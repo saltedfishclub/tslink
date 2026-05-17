@@ -70,7 +70,7 @@ func main() {
 
 	logger := core.NewLogger(*logLevel, *useJsonFormatLogger)
 
-	logger.Info("Starting tslink server", "level", logLevel, "configPath", configPath)
+	logger.Info("Starting tslink server", "level", *logLevel, "configPath", *configPath)
 
 	for {
 		isStopped := serviceLogic(*configPath, logger)
