@@ -1,0 +1,28 @@
+[core]
+auth_key = ""  # required
+control_url = "https://controlplane.tailscale.com"  # or your headscale instance
+hostname = ""  # leave blank to use machine name
+ephemeral = true
+accept_routes = true
+
+[[forward.web]]  # you -> others
+protocol = "tcp"
+tailscale_port = 8080
+local_addr = "127.0.0.1:9090"
+
+[[connect.web]]  # others -> you
+protocol = "tcp"
+local_port = 9000
+dst_addr = "any-client-in.ts.net:8080"
+
+[[connect.minecraft]]
+protocol = "minecraft"
+local_port = 25565
+dst_addr = "any-client-in.ts.net:25566"
+lan_enable = true
+lan_motd = "Minecraft via Tailscale"
+
+[[connect.udp_example]]
+protocol = "udp"
+local_port = 24454
+dst_addr = "any-client-in.ts.net:24454"
