@@ -35,6 +35,8 @@ func serviceLogic(configPath string, logger *slog.Logger) bool {
 
 	core.RunLanDiscoverService(ctx, cfg.Connect, logger.With("from", "lan_service"))
 
+	core.StartPeerConnectivityDiagnostics(ctx, logger, srv, cfg.Connect)
+
 	sigHandler := make(chan os.Signal, 1)
 	signal.Notify(sigHandler, os.Interrupt, syscall.SIGTERM)
 
