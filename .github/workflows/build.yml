@@ -1,0 +1,45 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26.3'
+        cache: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Build
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+      run: |
+        DATE=$(date +'%y%m%d')
+        BINARY_NAME="tslink-dev${DATE}-${{ matrix.goos }}_${{ matrix.goarch }}"
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+        fi
+        go build -v -o "release/${BINARY_NAME}" .
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tslink-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: release/
