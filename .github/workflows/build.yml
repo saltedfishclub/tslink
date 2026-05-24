@@ -9,15 +9,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       matrix:
         goos: [linux, windows, darwin]
         goarch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.26.3'
         cache: true
@@ -38,7 +40,7 @@ jobs:
 
     - name: Compress with UPX
       if: matrix.goos != 'darwin' && !(matrix.goos == 'windows' && matrix.goarch == 'arm64')
-      uses: crazy-max/ghaction-upx@v4.0.0
+      uses: crazy-max/ghaction-upx@v4
       with:
         files: |
           release/tslink*
@@ -49,7 +51,7 @@ jobs:
       run: echo "date=$(date +'%y%m%d')" >> $GITHUB_OUTPUT
 
     - name: Upload Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: tslink-dev${{ steps.date.outputs.date }}-${{ matrix.goos }}_${{ matrix.goarch }}
         path: release/
