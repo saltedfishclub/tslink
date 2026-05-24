@@ -37,12 +37,12 @@ jobs:
         go build -v -o "release/${BINARY_NAME}" .
 
     - name: Compress with UPX
-      uses: svenstaro/upx-action@v2
+      if: matrix.goos != 'darwin'
+      uses: crazy-max/ghaction-upx@v4.0.0
       with:
         files: |
           release/tslink*
         args: "-9"
-        strip: true
 
     - name: Get current date
       id: date
