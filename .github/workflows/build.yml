@@ -30,15 +30,26 @@ jobs:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
       run: |
-        DATE=$(date +'%y%m%d')
-        BINARY_NAME="tslink-dev${DATE}-${{ matrix.goos }}_${{ matrix.goarch }}"
+        BINARY_NAME="tslink"
         if [ "${{ matrix.goos }}" = "windows" ]; then
           BINARY_NAME="${BINARY_NAME}.exe"
         fi
         go build -v -o "release/${BINARY_NAME}" .
 
+    - name: Compress with UPX
+      uses: svenstaro/upx-action@v2
+      with:
+        files: |
+          release/tslink*
+        args: "-9"
+        strip: true
+
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%y%m%d')" >> $GITHUB_OUTPUT
+
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: tslink-${{ matrix.goos }}-${{ matrix.goarch }}
+        name: tslink-dev${{ steps.date.outputs.date }}-${{ matrix.goos }}_${{ matrix.goarch }}
         path: release/
