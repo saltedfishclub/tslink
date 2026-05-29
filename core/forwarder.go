@@ -88,11 +88,7 @@ func runForwarder(ctx context.Context, srv *tsnet.Server, rule ForwardRule, tag 
 }
 
 func runTCPForwarder(ctx context.Context, srv *tsnet.Server, rule ForwardRule, logger *slog.Logger) {
-	ip4, ip6 := srv.TailscaleIPs()
-	ip := ip4
-	if !ip.IsValid() {
-		ip = ip6
-	}
+	ip := getSelfTsnetAddr(srv)
 	ln, err := srv.Listen("tcp", fmt.Sprintf("%s:%d", ip.String(), rule.TailscalePort))
 	if err != nil {
 		logger.Error("failed to listen", "error", err)
@@ -178,11 +174,7 @@ func getConnType(ctx context.Context, srv *tsnet.Server, remoteAddrStr string) s
 }
 
 func runUDPForwarder(ctx context.Context, srv *tsnet.Server, rule ForwardRule, logger *slog.Logger) {
-	ip4, ip6 := srv.TailscaleIPs()
-	ip := ip4
-	if !ip.IsValid() {
-		ip = ip6
-	}
+	ip := getSelfTsnetAddr(srv)
 	ln, err := srv.Listen("udp", fmt.Sprintf("%s:%d", ip.String(), rule.TailscalePort))
 	if err != nil {
 		logger.Error("failed to listen", "error", err)

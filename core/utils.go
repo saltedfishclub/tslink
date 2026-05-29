@@ -109,6 +109,14 @@ func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][
 
 func peerConnectivityLogic(ctx context.Context, lc *local.Client, relativePeers []netip.Addr, logger *slog.Logger) {
 	for _, peer := range relativePeers {
+		loLog := logger.With("peer", peer)
+		peerInfo, err := lc.WhoIs(ctx, peer.String())
+		if err != nil {
+			loLog.Warn("failed to get peer info", "err", err)
+		} else {
+			loLog = loLog.With("name", peerInfo.Node.ComputedName)
+		}
+
 		ping, err := func() (*ipnstate.PingResult, error) {
 			cnclCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
@@ -117,22 +125,13 @@ func peerConnectivityLogic(ctx context.Context, lc *local.Client, relativePeers 
 			return ping, err
 		}()
 
-		loLog := logger.With("peer", peer)
-		peerInfo, err := lc.WhoIs(ctx, peer.String())
-		if err != nil {
-			loLog.Warn("failed to get peer info", "err", err)
-			continue
-		} else {
-			loLog = loLog.With("name", peerInfo.Node.ComputedName)
-		}
-
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
 				loLog.Warn("connectivity: peer ping timeout")
 			} else {
 				loLog.Warn("connectivity: failed to ping peer", "err", err)
 			}
-			return
+			continue
 		}
 
 		var connect string
@@ -179,4 +178,13 @@ func StartPeerConnectivityDiagnostics(ctx context.Context, logger *slog.Logger, 
 			}
 		}
 	}()
+}
+
+func getSelfTsnetAddr(srv *tsnet.Server) netip.Addr {
+	ip4, ip6 := srv.TailscaleIPs()
+	ip := ip4
+	if !ip.IsValid() {
+		ip = ip6
+	}
+	return ip
 }
