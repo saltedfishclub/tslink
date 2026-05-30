@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -21,9 +22,14 @@ func serviceLogic(configPath string, isTsnetDebug bool, logger *slog.Logger) boo
 	}
 
 	ctx, cancelAll := context.WithCancel(context.Background())
+	defer cancelAll()
 	logger.Info("initializing tsnet server")
 	srv, err := core.InitTsNet(ctx, &cfg.Core, logger, isTsnetDebug)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			logger.Debug("tsnet initialization timed out, retrying")
+			return false
+		}
 		logger.With(
 			slog.String("error", err.Error())).Error("Error initializing tsnet")
 		os.Exit(1)

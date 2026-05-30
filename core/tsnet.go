@@ -4,6 +4,7 @@ import (
 	"context"
 	fmt2 "fmt"
 	"log/slog"
+	"time"
 
 	"tailscale.com/ipn"
 
@@ -40,7 +41,9 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 		return nil, err
 	}
 
-	status, err := srv.Up(ctx)
+	cnclCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	status, err := srv.Up(cnclCtx)
 	if err != nil {
 		logger.With(slog.String("error", err.Error())).Error("bring up tsnet server failed")
 		return nil, err
