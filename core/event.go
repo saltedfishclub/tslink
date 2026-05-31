@@ -31,6 +31,7 @@ type LogEvent struct {
 
 type HostnameAssignedEvent struct {
 	Hostname string
+	IP       string
 }
 
 type LinkPeerConnectivityEvent struct {

@@ -42,6 +42,12 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger) (*tsnet.Serv
 	}
 	Events <- &LinkInitEvent{LinkInitControlPlaneConnected}
 
+	var ipStr string
+	if len(status.TailscaleIPs) > 0 {
+		ipStr = status.TailscaleIPs[0].String()
+	}
+	Events <- &HostnameAssignedEvent{Hostname: srv.Hostname, IP: ipStr}
+
 	for _, ip := range status.TailscaleIPs {
 		logger.With(slog.String("ip", ip.String())).Info("ip got from tsnet")
 	}

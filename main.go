@@ -13,6 +13,7 @@ import (
 
 	"gioui.org/app"
 )
+
 func serviceLogic(configPath string, logger *slog.Logger) bool {
 	core.Events <- &core.LinkInitEvent{
 		State: core.LinkInitFetchConfig,
@@ -36,7 +37,6 @@ func serviceLogic(configPath string, logger *slog.Logger) bool {
 		return true
 	}
 	logger.Info("tsnet server initialized")
-	core.Events <- &core.HostnameAssignedEvent{Hostname: srv.Hostname}
 
 	core.Events <- &core.LinkInitEvent{State: core.LinkInitProgramSetup}
 	core.StartForwarders(ctx, srv, cfg.Forward)

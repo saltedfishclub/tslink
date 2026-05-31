@@ -155,7 +155,7 @@ func StartPeerConnectivityDiagnostics(ctx context.Context, logger *slog.Logger, 
 			return
 		}
 
-		ticker := time.NewTicker(120 * time.Second)
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		peerConnectivityLogic(ctx, lc, relativePeers, logger) // execute now
