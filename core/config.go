@@ -2,10 +2,19 @@ package core
 
 import (
 	"bytes"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
+
+// DefaultConfigURL is the default URL for fetching config.
+// Set via build flags: go build -ldflags "-X tslink/core.DefaultConfigURL=https://..."
+var DefaultConfigURL string
 
 type ForwardRule struct {
 	Protocol      string `toml:"protocol"`
@@ -50,7 +59,16 @@ type Config struct {
 	Connect map[string][]ConnectRule `toml:"connect"`
 }
 
+// LoadConfig loads configuration from a file path or URL.
+// If path starts with "http://" or "https://", it fetches the config from the URL.
+// Otherwise, it reads from the local file system.
 func LoadConfig(path string) (*Config, error) {
+	// Detect URL
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return loadConfigFromURL(path)
+	}
+
+	// File-based loading
 	cfg := &Config{
 		Core: Core{
 			Hostname:     "",
@@ -72,6 +90,53 @@ func LoadConfig(path string) (*Config, error) {
 	_, err := toml.DecodeFile(path, cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.Core.Hostname == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			hostname = "unknown"
+		}
+		cfg.Core.Hostname = hostname
+	}
+
+	return cfg, nil
+}
+
+// loadConfigFromURL fetches a TOML config from the given URL and decodes it.
+func loadConfigFromURL(url string) (*Config, error) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch config from URL %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch config from URL %s: unexpected status %d", url, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body from %s: %w", url, err)
+	}
+
+	cfg := &Config{
+		Core: Core{
+			Hostname:     "",
+			Ephemeral:    true,
+			AcceptRoutes: true,
+		},
+		Forward: make(map[string][]ForwardRule),
+		Connect: make(map[string][]ConnectRule),
+	}
+
+	err = toml.Unmarshal(body, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode TOML config from %s: %w", url, err)
 	}
 
 	if cfg.Core.Hostname == "" {

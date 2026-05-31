@@ -1,2 +1,5 @@
 *.exe
 ./.idea
+.idea/**
+.gocache/**
+tslink
