@@ -53,6 +53,14 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 		logger.With(slog.String("ip", ip.String())).Info("ip got from tsnet")
 	}
 
+	rawSuffix, err := GetMagicDNSSuffixFromStatus(status)
+	if err != nil {
+		logger.Debug("failed to extract MagicDNS suffix", slog.String("error", err.Error()))
+	} else {
+		SetMagicDNSSuffix(rawSuffix)
+		logger.Info("MagicDNS suffix extracted", slog.String("suffix", rawSuffix))
+	}
+
 	if cfg.AcceptRoutes {
 		lc, err := srv.LocalClient()
 		if err != nil {

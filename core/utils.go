@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"tailscale.com/client/local"
@@ -188,4 +189,84 @@ func getSelfTsnetAddr(srv *tsnet.Server) netip.Addr {
 		ip = ip6
 	}
 	return ip
+}
+
+var (
+	magicDNSSuffixMu sync.RWMutex
+	magicDNSSuffix   string
+)
+
+func SetMagicDNSSuffix(raw string) {
+	magicDNSSuffixMu.Lock()
+	defer magicDNSSuffixMu.Unlock()
+	magicDNSSuffix = strings.Trim(raw, ".")
+}
+
+func GetMagicDNSSuffix() (string, bool) {
+	magicDNSSuffixMu.RLock()
+	defer magicDNSSuffixMu.RUnlock()
+	if magicDNSSuffix == "" {
+		return "", false
+	}
+	return magicDNSSuffix, true
+}
+
+func GetMagicDNSSuffixFromStatus(st *ipnstate.Status) (string, error) {
+	suffix := st.CurrentTailnet.MagicDNSSuffix
+	if suffix == "" {
+		suffix = st.MagicDNSSuffix
+	}
+	suffix = strings.Trim(suffix, ".")
+	if suffix == "" {
+		return "", errors.New("magic dns suffix not found in status")
+	}
+	return suffix, nil
+}
+
+func NormalizeDstAddrWithSuffix(dst string) (string, bool, error) {
+	host, port, err := net.SplitHostPort(dst)
+	if err != nil {
+		return dst, false, err
+	}
+
+	if _, err := netip.ParseAddr(host); err == nil {
+		return dst, false, nil
+	}
+
+	if strings.Contains(host, ".") {
+		return dst, false, nil
+	}
+
+	suffix, ok := GetMagicDNSSuffix()
+	if !ok {
+		return dst, false, nil
+	}
+
+	normalized := net.JoinHostPort(host+"."+suffix, port)
+	return normalized, true, nil
+}
+
+func NormalizeConnectRulesDstAddr(rules map[string][]ConnectRule, logger *slog.Logger) {
+	for tag, rrs := range rules {
+		for i := range rrs {
+			rule := &rrs[i]
+			normalized, changed, err := NormalizeDstAddrWithSuffix(rule.DstAddr)
+			if err != nil {
+				logger.Debug("failed to normalize dst_addr",
+					slog.String("tag", tag),
+					slog.String("dst", rule.DstAddr),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			if changed {
+				logger.Debug("dst_addr normalized with MagicDNS suffix",
+					slog.String("tag", tag),
+					slog.String("original", rule.DstAddr),
+					slog.String("normalized", normalized),
+				)
+				rule.DstAddr = normalized
+			}
+		}
+	}
 }

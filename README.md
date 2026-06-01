@@ -1,203 +1,38 @@
-# tsnet_pure 使用说明
+# tslink
 
-`tsnet_pure` 是一个基于 `tailscale.com/tsnet` 的轻量转发工具，支持：
+基于 [Tailscale](https://tailscale.com) `tsnet` 的轻量双向流量转发工具，可将本机服务暴露到 Tailnet，也可将 Tailnet 服务通过本机端口对外暴露。
 
-- `forward`：将 **Tailscale 入站** 请求转发到本机服务（你 -> 其他人）。
-- `connect`：将 **本机/LAN 入站** 请求转发到 Tailscale 目标（其他人 -> 你）。
+## 特性
 
-支持 `tcp`、`udp`，并对 `minecraft` 协议提供局域网发现能力。
-
----
+- **双向转发**：`forward`（Tailscale → 本地）与 `connect`（本地 → Tailscale）两种模式
+- **TCP / UDP 全支持**：透明转发 TCP 流与 UDP 数据包
+- **Minecraft 专用模式**：支持局域网广播发现（MOTD），让本地设备发现 Tailnet 上的 Minecraft 服务器
+- **MagicDNS 主机名补全**：`dst_addr` 支持短主机名（如 `home:8080`），启动时自动补全为 `home.<suffix>:8080`
+- **连接类型识别**：区分 `direct` 直连与 `derp` 中继，便于排查延迟问题
+- **对端连通性诊断**：定期 ping 目标节点并报告延迟与连接路径（direct/DERP）
+- **Web 管理**：内置 Tailscale Web Client（端口 `5252`），可在线管理节点配置
+- **多配置源**：支持本地 TOML 文件、HTTP/HTTPS URL、构建时注入默认 URL
 
 ## 环境要求
 
 - Go 1.26+
-- 可用的 Tailscale `auth_key`（或 Headscale 对应密钥）
+- Tailscale / Headscale 授权密钥
 
-## 安装与构建
-
-在项目根目录执行：
+## 快速开始
 
 ```powershell
-go mod tidy
 go build -o tslink.exe .
-```
-
-如果你已有编译产物，也可以直接运行现成的 `tslink.exe`。
-
-### 构建时注入默认配置 URL
-
-通过 `-ldflags` 在构建时嵌入默认配置地址，之后直接运行即可从该 URL 自动加载配置：
-
-```powershell
-go build -ldflags "-X tslink/core.DefaultConfigURL=https://config.example.com/tslink.toml" -o tslink.exe .
-```
-
-构建后运行无需额外参数，程序自动从该 URL 获取配置。
-
----
-
-## 配置文件
-
-默认使用根目录 `config.toml`，也可通过 URL 加载（见下文）。
-
-项目已提供 `config.example.toml`，可复制后修改：
-
-```powershell
-Copy-Item .\config.example.toml .\config.toml
-```
-
-### `[core]` 配置
-
-```toml
-[core]
-auth_key = ""  # 必填
-control_url = "https://controlplane.tailscale.com"  # 官方控制面或 Headscale
-hostname = ""  # 留空时自动使用机器名
-ephemeral = true
-accept_routes = true
-```
-
-- `auth_key`：Tailscale/Headscale 授权密钥。
-- `control_url`：默认是官方控制面，使用 Headscale 时改为你的实例地址。
-- `hostname`：节点名，为空则自动取系统主机名。
-- `ephemeral`：是否使用临时节点。
-- `accept_routes`：是否自动启用路由接收（`RouteAll`）。
-
-### `[[forward.<tag>]]` 规则（你 -> 其他人）
-
-```toml
-[[forward.web]]
-protocol = "tcp"
-tailscale_port = 8080
-local_addr = "127.0.0.1:9090"
-```
-
-含义：监听本机 Tailscale IP 的 `8080`，转发到本地 `127.0.0.1:9090`。
-
-字段说明：
-
-- `protocol`：`tcp` 或 `udp`
-- `tailscale_port`：对 Tailnet 暴露端口
-- `local_addr`：本地目标地址（`host:port`）
-
-### `[[connect.<tag>]]` 规则（其他人 -> 你）
-
-```toml
-[[connect.web]]
-protocol = "tcp"
-local_port = 9000
-dst_addr = "any-client-in.ts.net:8080"
-```
-
-含义：监听本机 `9000`，流量转发到 Tailscale 目标 `any-client-in.ts.net:8080`。
-
-字段说明：
-
-- `protocol`：`tcp`、`udp` 或 `minecraft`
-- `local_port`：本地监听端口
-- `local_addr`：本地监听地址（可选，默认 `0.0.0.0`）
-- `dst_addr`：Tailscale 目标地址（`host:port`）
-- `lan_enable`：仅 `minecraft` 场景常用；不填时 `minecraft` 默认启用
-- `lan_motd`：Minecraft 局域网广播提示文案
-
-Minecraft 示例：
-
-```toml
-[[connect.minecraft]]
-protocol = "minecraft"
-local_port = 25565
-dst_addr = "any-client-in.ts.net:25566"
-lan_enable = true
-lan_motd = "Minecraft via Tailscale"
-```
-
----
-
-## 启动方式
-
-### 本地配置文件
-
-```powershell
 .\tslink.exe -c config.toml
 ```
 
-### 从 URL 加载配置
+详细配置与使用说明见 [USAGE.md](USAGE.md)。
 
-支持从 HTTP/HTTPS URL 加载配置，方便集中管理：
+## 工作原理
 
-```powershell
-.\tslink.exe --config-url https://config.example.com/tslink.toml
 ```
+forward (你 -> 其他人):
+  Tailscale Client ──TCP/UDP──> [本机 Tailscale IP:port] ──转发──> [本地服务 127.0.0.1:port]
 
-### 使用构建时默认 URL
-
-如果构建时通过 `-ldflags "-X tslink/core.DefaultConfigURL=..."` 注入了默认 URL，直接运行程序即可自动从该 URL 加载：
-
-```powershell
-.\tslink.exe
+connect (其他人 -> 你):
+  本地/LAN 客户端 ──TCP/UDP──> [本机监听 port] ──转发──> [Tailscale 目标 host:port]
 ```
-
-### 配置来源优先级
-
-| 优先级 | 来源 | 说明 |
-|--------|------|------|
-| 最高 | `--config-url` 命令行参数 | 显式指定的 URL |
-| 中 | ldflags `DefaultConfigURL` | 构建时嵌入的默认 URL |
-| 低 | `-c` 本地文件 | 默认 `config.toml` |
-| 回退 | 写入默认配置 | 无任何配置源时自动生成 |
-
-命令行参数的优先级高于构建时注入的默认值，方便开发调试时覆盖。
-
----
-
-## 命令行参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-c` | `config.toml` | 配置文件路径，当 `--config-url` 未指定且无 ldflags 默认 URL 时使用 |
-| `--config-url` | 空（或 ldflags 设置的默认值） | 配置 URL，优先级高于 `-c` |
-| `-level` | `info` | 日志级别（`debug \| info \| warn \| error`） |
-| `-json-format` | `false` | 输出 JSON 日志 |
-| `-diagnose` | `false` | 启用 tsnet debug 日志 |
-
-示例：
-
-```powershell
-# 使用本地配置文件
-.\tslink.exe -c .\config.toml -level debug -diagnose
-
-# 使用 URL 配置
-.\tslink.exe --config-url https://config.example.com/tslink.toml -level debug
-
-# 使用 ldflags 注入的默认 URL
-.\tslink.exe
-```
-
----
-
-## 运行与退出
-
-- 启动后程序会初始化 tsnet 并按配置启动所有 `forward/connect` 规则。
-- 按 `Ctrl + C` 可优雅退出。
-- 内置 watchdog 可能在异常时自动触发重启逻辑。
-
----
-
-## 常见问题
-
-### 首次启动失败 / 无法入网
-
-- 检查 `auth_key` 是否正确、是否过期。
-- 若使用 Headscale，确认 `control_url` 可访问且 TLS/证书配置正确。
-
-### 端口无法访问
-
-- 检查本地防火墙与目标服务是否真的在 `local_addr` 监听。
-- 确认 `dst_addr` 可在 Tailnet 内解析并连通。
-- 核对 `protocol` 是否与目标服务一致（`tcp/udp` 不可混用）。
-
-### 日志排查建议
-
-- 使用 `-level debug` 查看更详细转发日志。
-- 需要 tsnet 内部信息时加 `-diagnose`。
