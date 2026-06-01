@@ -20,6 +20,10 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 		}
 	}
 
+	if withDebugLog {
+		logger.Warn("Tsnet will be turn on their embedded web client, use for your own risk")
+	}
+
 	srv := &tsnet.Server{
 		Hostname:  "tslink-" + cfg.Hostname,
 		AuthKey:   cfg.AuthKey,
@@ -28,7 +32,7 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 		UserLogf: func(fmt string, args ...interface{}) {
 			logger.With(slog.String("from", "tsnet")).Info(fmt2.Sprintf(fmt, args...))
 		},
-		RunWebClient: true,
+		RunWebClient: withDebugLog,
 	}
 
 	if cfg.ControlURL != "" {
