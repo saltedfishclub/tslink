@@ -213,9 +213,6 @@ func GetMagicDNSSuffix() (string, bool) {
 
 func GetMagicDNSSuffixFromStatus(st *ipnstate.Status) (string, error) {
 	suffix := st.CurrentTailnet.MagicDNSSuffix
-	if suffix == "" {
-		suffix = st.MagicDNSSuffix
-	}
 	suffix = strings.Trim(suffix, ".")
 	if suffix == "" {
 		return "", errors.New("magic dns suffix not found in status")
