@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
 	"tailscale.com/client/local"
@@ -44,37 +43,6 @@ func StartTimeWatchDog(ctx context.Context, logger *slog.Logger) <-chan struct{}
 		}
 	}()
 	return ch
-}
-
-func resolveAddr(ctx context.Context, srv *tsnet.Server, addr string) (*netip.Addr, error) {
-	lc, err := srv.LocalClient()
-	if err != nil {
-		return nil, err
-	}
-	stat, err := lc.Status(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if ip, err := netip.ParseAddr(addr); err == nil {
-		for _, peer := range stat.Peer {
-			for _, ipRange := range peer.AllowedIPs.All() {
-				if ipRange.Contains(ip) {
-					return &peer.TailscaleIPs[0], nil
-				}
-			}
-		}
-	} else {
-		// addr is domain, resolve it
-		for _, peer := range stat.Peer {
-			dnsName := strings.TrimSuffix(peer.DNSName, ".")
-			if dnsName == addr {
-				return &peer.TailscaleIPs[0], nil
-			}
-		}
-	}
-
-	return nil, errors.New(fmt.Sprintf("addr '%s' not found in tsnet", addr))
 }
 
 func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][]ConnectRule, logger *slog.Logger) ([]netip.Addr, error) {
@@ -189,35 +157,6 @@ func getSelfTsnetAddr(srv *tsnet.Server) netip.Addr {
 		ip = ip6
 	}
 	return ip
-}
-
-var (
-	magicDNSSuffixMu sync.RWMutex
-	magicDNSSuffix   string
-)
-
-func SetMagicDNSSuffix(raw string) {
-	magicDNSSuffixMu.Lock()
-	defer magicDNSSuffixMu.Unlock()
-	magicDNSSuffix = strings.Trim(raw, ".")
-}
-
-func GetMagicDNSSuffix() (string, bool) {
-	magicDNSSuffixMu.RLock()
-	defer magicDNSSuffixMu.RUnlock()
-	if magicDNSSuffix == "" {
-		return "", false
-	}
-	return magicDNSSuffix, true
-}
-
-func GetMagicDNSSuffixFromStatus(st *ipnstate.Status) (string, error) {
-	suffix := st.CurrentTailnet.MagicDNSSuffix
-	suffix = strings.Trim(suffix, ".")
-	if suffix == "" {
-		return "", errors.New("magic dns suffix not found in status")
-	}
-	return suffix, nil
 }
 
 func NormalizeDstAddrWithSuffix(ctx context.Context, srv *tsnet.Server, dst string) (string, bool, error) {
