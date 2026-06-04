@@ -220,7 +220,7 @@ func GetMagicDNSSuffixFromStatus(st *ipnstate.Status) (string, error) {
 	return suffix, nil
 }
 
-func NormalizeDstAddrWithSuffix(dst string) (string, bool, error) {
+func NormalizeDstAddrWithSuffix(ctx context.Context, srv *tsnet.Server, dst string) (string, bool, error) {
 	host, port, err := net.SplitHostPort(dst)
 	if err != nil {
 		return dst, false, err
@@ -230,24 +230,29 @@ func NormalizeDstAddrWithSuffix(dst string) (string, bool, error) {
 		return dst, false, nil
 	}
 
-	if strings.Contains(host, ".") {
-		return dst, false, nil
-	}
-
 	suffix, ok := GetMagicDNSSuffix()
 	if !ok {
 		return dst, false, nil
 	}
 
 	normalized := net.JoinHostPort(host+"."+suffix, port)
+
+	// check domain exists before use
+	if strings.Contains(host, ".") {
+		_, err = resolveAddr(ctx, srv, normalized)
+		if err != nil {
+			return dst, false, nil
+		}
+	}
+
 	return normalized, true, nil
 }
 
-func NormalizeConnectRulesDstAddr(rules map[string][]ConnectRule, logger *slog.Logger) {
+func NormalizeConnectRulesDstAddr(ctx context.Context, srv *tsnet.Server, rules map[string][]ConnectRule, logger *slog.Logger) {
 	for tag, rrs := range rules {
 		for i := range rrs {
 			rule := &rrs[i]
-			normalized, changed, err := NormalizeDstAddrWithSuffix(rule.DstAddr)
+			normalized, changed, err := NormalizeDstAddrWithSuffix(ctx, srv, rule.DstAddr)
 			if err != nil {
 				logger.Debug("failed to normalize dst_addr",
 					slog.String("tag", tag),
