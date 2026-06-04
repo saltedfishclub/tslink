@@ -7,7 +7,7 @@
 - **双向转发**：`forward`（Tailscale → 本地）与 `connect`（本地 → Tailscale）两种模式
 - **TCP / UDP 全支持**：透明转发 TCP 流与 UDP 数据包
 - **Minecraft 专用模式**：支持局域网广播发现（MOTD），让本地设备发现 Tailnet 上的 Minecraft 服务器
-- **MagicDNS 主机名补全**：`dst_addr` 支持短主机名（如 `home:8080`），启动时自动补全为 `home.<suffix>:8080`
+- **MagicDNS 主机名补全**：`dst_addr` 支持按照 Tailscale 规则正确解析 Split DNS 和 Magic DNS
 - **连接类型识别**：区分 `direct` 直连与 `derp` 中继，便于排查延迟问题
 - **对端连通性诊断**：定期 ping 目标节点并报告延迟与连接路径（direct/DERP）
 - **Web 管理**：内置 Tailscale Web Client（端口 `5252`），可在线管理节点配置

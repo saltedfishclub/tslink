@@ -8,11 +8,12 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/net/dns"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
@@ -80,24 +81,14 @@ func resolveAddr(ctx context.Context, srv *tsnet.Server, addr string) (*netip.Ad
 func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][]ConnectRule, logger *slog.Logger) ([]netip.Addr, error) {
 	peerSet := make(map[netip.Addr]struct{})
 
-	for tag, rrs := range rules {
+	for _, rrs := range rules {
 		for _, rule := range rrs {
 			rule := rule
-			tag := tag
-
-			ap, _, err := net.SplitHostPort(rule.DstAddr)
+			ap, err := netip.ParseAddrPort(rule.DstAddr)
 			if err != nil {
-				logger.Debug("error parsing rule", "tag", tag, "dst", rule.DstAddr, "err", err)
 				continue
 			}
-			addr, err := resolveAddr(ctx, srv, ap)
-
-			if err != nil {
-				logger.Warn("failed to resolve address", "err", err)
-				continue
-			}
-			logger.Debug("address found", "dst_addr", rule.DstAddr, "tag", tag, "address", addr)
-			peerSet[*addr] = struct{}{}
+			peerSet[ap.Addr()] = struct{}{}
 		}
 	}
 
@@ -191,36 +182,7 @@ func getSelfTsnetAddr(srv *tsnet.Server) netip.Addr {
 	return ip
 }
 
-var (
-	magicDNSSuffixMu sync.RWMutex
-	magicDNSSuffix   string
-)
-
-func SetMagicDNSSuffix(raw string) {
-	magicDNSSuffixMu.Lock()
-	defer magicDNSSuffixMu.Unlock()
-	magicDNSSuffix = strings.Trim(raw, ".")
-}
-
-func GetMagicDNSSuffix() (string, bool) {
-	magicDNSSuffixMu.RLock()
-	defer magicDNSSuffixMu.RUnlock()
-	if magicDNSSuffix == "" {
-		return "", false
-	}
-	return magicDNSSuffix, true
-}
-
-func GetMagicDNSSuffixFromStatus(st *ipnstate.Status) (string, error) {
-	suffix := st.CurrentTailnet.MagicDNSSuffix
-	suffix = strings.Trim(suffix, ".")
-	if suffix == "" {
-		return "", errors.New("magic dns suffix not found in status")
-	}
-	return suffix, nil
-}
-
-func NormalizeDstAddrWithSuffix(dst string) (string, bool, error) {
+func PresolveDstAddrWithSuffix(dst string, srv *tsnet.Server) (string, bool, error) {
 	host, port, err := net.SplitHostPort(dst)
 	if err != nil {
 		return dst, false, err
@@ -230,26 +192,85 @@ func NormalizeDstAddrWithSuffix(dst string) (string, bool, error) {
 		return dst, false, nil
 	}
 
-	if strings.Contains(host, ".") {
-		return dst, false, nil
-	}
-
-	suffix, ok := GetMagicDNSSuffix()
+	dnsMgr, ok := srv.Sys().DNSManager.GetOK()
 	if !ok {
-		return dst, false, nil
+		return dst, false, errors.New("DNS manager not available")
 	}
-
-	normalized := net.JoinHostPort(host+"."+suffix, port)
-	return normalized, true, nil
+	addr, err := resolveHostViaResolver(dnsMgr, host)
+	if err != nil {
+		return dst, false, err
+	}
+	return net.JoinHostPort(addr.String(), port), true, nil
 }
 
-func NormalizeConnectRulesDstAddr(rules map[string][]ConnectRule, logger *slog.Logger) {
+// resolveHostViaResolver resolves a hostname to a netip.Addr using the
+// Tailscale DNS resolver. It queries A and AAAA records in a single
+// message and follows CNAME chains (up to 8 levels deep).
+func resolveHostViaResolver(resolver *dns.Manager, host string) (netip.Addr, error) {
+	return resolveHostWithDepth(resolver, host, 0)
+}
+
+func resolveHostWithDepth(r *dns.Manager, host string, depth int) (netip.Addr, error) {
+	const maxCNAMEChase = 8
+	if depth > maxCNAMEChase {
+		return netip.Addr{}, fmt.Errorf("CNAME chain too deep for %s", host)
+	}
+
+	name, err := dnsmessage.NewName(host + ".")
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("invalid hostname %s: %w", host, err)
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{RecursionDesired: true},
+		Questions: []dnsmessage.Question{
+			{Name: name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+		},
+	}
+	queryBytes, err := msg.Pack()
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to pack DNS query: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	respBytes, err := r.Query(ctx, queryBytes, "udp", netip.AddrPort{})
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
+	}
+
+	var resp dnsmessage.Message
+	if err := resp.Unpack(respBytes); err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to unpack DNS response: %w", err)
+	}
+
+	var cnameTarget string
+	for _, ans := range resp.Answers {
+		switch r := ans.Body.(type) {
+		case *dnsmessage.AResource:
+			if ip := netip.AddrFrom4(r.A); ip.IsValid() {
+				return ip, nil
+			}
+		case *dnsmessage.CNAMEResource:
+			cnameTarget = strings.TrimSuffix(r.CNAME.String(), ".")
+		}
+	}
+
+	// Follow CNAME if no direct A found
+	if cnameTarget != "" {
+		return resolveHostWithDepth(r, cnameTarget, depth+1)
+	}
+
+	return netip.Addr{}, fmt.Errorf("no A/AAAA record found for %s", host)
+}
+
+func PresolveConnectRulesDstAddr(rules map[string][]ConnectRule, logger *slog.Logger, srv *tsnet.Server) {
 	for tag, rrs := range rules {
 		for i := range rrs {
 			rule := &rrs[i]
-			normalized, changed, err := NormalizeDstAddrWithSuffix(rule.DstAddr)
+			normalized, changed, err := PresolveDstAddrWithSuffix(rule.DstAddr, srv)
 			if err != nil {
-				logger.Debug("failed to normalize dst_addr",
+				logger.Warn("failed to resolve dst_addr",
 					slog.String("tag", tag),
 					slog.String("dst", rule.DstAddr),
 					slog.String("error", err.Error()),
@@ -257,7 +278,7 @@ func NormalizeConnectRulesDstAddr(rules map[string][]ConnectRule, logger *slog.L
 				continue
 			}
 			if changed {
-				logger.Debug("dst_addr normalized with MagicDNS suffix",
+				logger.Debug("dst_addr resolved",
 					slog.String("tag", tag),
 					slog.String("original", rule.DstAddr),
 					slog.String("normalized", normalized),
