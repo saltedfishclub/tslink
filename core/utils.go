@@ -13,7 +13,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
-	"tailscale.com/net/dns"
+	"tailscale.com/net/dns/resolver"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
@@ -196,26 +196,47 @@ func PresolveDstAddrWithSuffix(dst string, srv *tsnet.Server) (string, bool, err
 	if !ok {
 		return dst, false, errors.New("DNS manager not available")
 	}
-	addr, err := resolveHostViaResolver(dnsMgr, host)
+	addr, err := resolveHostViaResolver(dnsMgr.Resolver(), host)
 	if err != nil {
-		return dst, false, err
+		// tsnet magicdns failed; fall back to system DNS for non-tailnet domains
+		addr, err = fallbackSystemDNS(host)
+		if err != nil {
+			return dst, false, err
+		}
 	}
 	return net.JoinHostPort(addr.String(), port), true, nil
+}
+
+// fallbackSystemDNS resolves a hostname via the standard system resolver.
+// Returns the first usable IPv4 address (preferred) or IPv6 address.
+func fallbackSystemDNS(host string) (netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("system DNS resolution failed for %s: %w", host, err)
+	}
+
+	for _, ip := range ips {
+		if ip.Is4() {
+			return ip, nil
+		}
+	}
+	// no IPv4 found, pick the first IPv6
+	for _, ip := range ips {
+		if ip.Is6() {
+			return ip, nil
+		}
+	}
+
+	return netip.Addr{}, fmt.Errorf("no valid IPs returned for %s", host)
 }
 
 // resolveHostViaResolver resolves a hostname to a netip.Addr using the
 // Tailscale DNS resolver. It queries A and AAAA records in a single
 // message and follows CNAME chains (up to 8 levels deep).
-func resolveHostViaResolver(resolver *dns.Manager, host string) (netip.Addr, error) {
-	return resolveHostWithDepth(resolver, host, 0)
-}
-
-func resolveHostWithDepth(r *dns.Manager, host string, depth int) (netip.Addr, error) {
-	const maxCNAMEChase = 8
-	if depth > maxCNAMEChase {
-		return netip.Addr{}, fmt.Errorf("CNAME chain too deep for %s", host)
-	}
-
+func resolveHostViaResolver(resolver *resolver.Resolver, host string) (netip.Addr, error) {
 	name, err := dnsmessage.NewName(host + ".")
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("invalid hostname %s: %w", host, err)
@@ -234,7 +255,7 @@ func resolveHostWithDepth(r *dns.Manager, host string, depth int) (netip.Addr, e
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	respBytes, err := r.Query(ctx, queryBytes, "udp", netip.AddrPort{})
+	respBytes, err := resolver.Query(ctx, queryBytes, "udp", netip.AddrPort{})
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
 	}
@@ -244,21 +265,13 @@ func resolveHostWithDepth(r *dns.Manager, host string, depth int) (netip.Addr, e
 		return netip.Addr{}, fmt.Errorf("failed to unpack DNS response: %w", err)
 	}
 
-	var cnameTarget string
 	for _, ans := range resp.Answers {
 		switch r := ans.Body.(type) {
 		case *dnsmessage.AResource:
 			if ip := netip.AddrFrom4(r.A); ip.IsValid() {
 				return ip, nil
 			}
-		case *dnsmessage.CNAMEResource:
-			cnameTarget = strings.TrimSuffix(r.CNAME.String(), ".")
 		}
-	}
-
-	// Follow CNAME if no direct A found
-	if cnameTarget != "" {
-		return resolveHostWithDepth(r, cnameTarget, depth+1)
 	}
 
 	return netip.Addr{}, fmt.Errorf("no A/AAAA record found for %s", host)
