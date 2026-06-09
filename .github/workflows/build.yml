@@ -121,14 +121,30 @@ jobs:
     steps:
     - uses: actions/download-artifact@v5
 
+    - name: Rename binaries
+      run: |
+        for dir in */; do
+          dir=${dir%/}
+          plat=$(echo "$dir" | grep -oE '(linux|windows|darwin)_(amd64|arm64)$')
+          version=$(echo "$dir" | sed "s/^tslink-//; s/-${plat}$//")
+          platform=$(echo "$plat" | tr '_' '-')
+          for bin in "$dir"/tslink "$dir"/tslink.exe; do
+            if [ -f "$bin" ]; then
+              case "$bin" in
+                *.exe) mv "$bin" "$dir/tslink-${version}-${platform}.exe" ;;
+                *)     mv "$bin" "$dir/tslink-${version}-${platform}" ;;
+              esac
+            fi
+          done
+        done
+
     - name: Generate checksums
       run: |
-        find . -type f \( -name 'tslink' -o -name 'tslink.exe' \) -exec sha256sum {} \; > tslink_checksums.txt
+        find . -type f -name 'tslink-*' -exec sha256sum {} \; > tslink-checksums.txt
 
     - name: Upload to release
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          */tslink
-          */tslink.exe
-          tslink_checksums.txt
+          */tslink-*
+          tslink-checksums.txt
