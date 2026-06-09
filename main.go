@@ -43,7 +43,7 @@ func serviceLogic(configPath string, isTsnetDebug bool, configURL string, logger
 	}
 	logger.Info("tsnet server initialized")
 
-	core.PresolveConnectRulesDstAddr(cfg.Connect, logger, srv)
+	core.NormalizeConnectRulesDstAddr(ctx, srv, cfg.Connect, logger)
 
 	core.StartForwarders(ctx, srv, cfg.Forward)
 	core.StartConnectors(ctx, srv, cfg.Connect)
