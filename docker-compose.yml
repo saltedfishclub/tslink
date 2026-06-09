@@ -1,0 +1,14 @@
+services:
+  tslink:
+    image: ghcr.io/saltedfishclub/tslink:latest
+    ports:
+      - "9000:9000"
+      - "25565:25565"
+    volumes:
+      - ./config.toml:/etc/tslink/config.toml:ro
+      - tslink_state:/var/lib/tslink
+    command: ["-c", "/etc/tslink/config.toml"]
+    restart: unless-stopped
+
+volumes:
+  tslink_state:
