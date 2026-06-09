@@ -82,7 +82,7 @@ func runTCPConnector(ctx context.Context, srv *tsnet.Server, rule ConnectRule, l
 		logger.Error("failed to listen locally", "error", err)
 		return
 	}
-	logger.Info("listening", slog.String("on", addr))
+	logger.Debug("listening", slog.String("on", addr))
 
 	go func() {
 		<-ctx.Done()
