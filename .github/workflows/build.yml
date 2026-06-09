@@ -26,6 +26,14 @@ jobs:
         go-version: '1.26.3'
         cache: true
 
+    - name: Cache Go build cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/go-build
+        key: ${{ runner.os }}-go-build-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-build-${{ matrix.goos }}-${{ matrix.goarch }}-
+
     - name: Install dependencies
       run: go mod download
 
@@ -48,14 +56,19 @@ jobs:
           release/tslink*
         args: "-9"
 
-    - name: Get current date
-      id: date
-      run: echo "date=$(date +'%y%m%d')" >> $GITHUB_OUTPUT
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "release" ]; then
+          echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        else
+          echo "version=dev$(date +'%y%m%d')" >> $GITHUB_OUTPUT
+        fi
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v5
       with:
-        name: tslink-dev${{ steps.date.outputs.date }}-${{ matrix.goos }}_${{ matrix.goarch }}
+        name: tslink-${{ steps.version.outputs.version }}-${{ matrix.goos }}_${{ matrix.goarch }}
         path: release/
 
   container:
@@ -72,6 +85,14 @@ jobs:
       with:
         go-version: '1.26.3'
         cache: true
+
+    - name: Cache Go build cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/go-build
+        key: ${{ runner.os }}-go-build-container-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-build-container-
 
     - name: Login to ghcr.io
       uses: docker/login-action@v3
@@ -90,3 +111,24 @@ jobs:
         ko build --bare ./ --platform=all \
           -t latest \
           -t ${{ github.ref_name }}
+
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v5
+
+    - name: Generate checksums
+      run: |
+        find . -type f \( -name 'tslink' -o -name 'tslink.exe' \) -exec sha256sum {} \; > tslink_checksums.txt
+
+    - name: Upload to release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          */tslink
+          */tslink.exe
+          tslink_checksums.txt
