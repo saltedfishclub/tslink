@@ -15,14 +15,29 @@
 
 ## 环境要求
 
-- Go 1.26+
 - Tailscale / Headscale 授权密钥
 
 ## 快速开始
 
-```powershell
-go build -o tslink.exe .
-.\tslink.exe -c config.toml
+1. 前往 [Releases](https://github.com/saltedfishclub/tslink/releases) 下载对应平台的二进制文件，赋予执行权限后放入 PATH
+
+2. 准备配置文件：
+   ```bash
+   cp config.example.toml config.toml
+   vim config.toml  # 填入 auth_key 并配置转发规则
+   ```
+
+3. 启动：
+   ```bash
+   tslink -c config.toml
+   ```
+
+## 容器部署
+
+```bash
+cp config.example.toml config.toml
+# 编辑 config.toml，然后对照修改 docker-compose.yml 中的端口映射
+docker compose up -d
 ```
 
 详细配置与使用说明见 [USAGE.md](USAGE.md)。
