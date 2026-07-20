@@ -102,7 +102,17 @@ func (r *udpRelay) run(ctx context.Context) {
 			r.mu.Unlock()
 			var dialed net.Conn
 			if inTsnet {
-				dialed, err = dialTsnet(ctx, r.srv, "udp", r.dialAddr)
+				// Resolve MagicDNS / split-DNS names through the tailnet
+				// resolver before dialing; tsnet's own Dial cannot resolve
+				// custom split-DNS suffixes.
+				dialAddr := r.dialAddr
+				if resolved, rerr := resolveDialAddr(ctx, r.srv, r.dialAddr); rerr != nil {
+					r.logger.Debug("failed to resolve dst via tailnet dns, dialing name directly",
+						slog.String("dst", r.dialAddr), slog.String("error", rerr.Error()))
+				} else {
+					dialAddr = resolved
+				}
+				dialed, err = dialTsnet(ctx, r.srv, "udp", dialAddr)
 			} else {
 				dialed, err = dialUDP(ctx, r.dialAddr)
 			}
