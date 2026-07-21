@@ -105,7 +105,17 @@ func runTCPConnector(ctx context.Context, srv *tsnet.Server, rule ConnectRule, l
 func handleTCPConnect(ctx context.Context, srv *tsnet.Server, conn net.Conn, rule ConnectRule, logger *slog.Logger) {
 	clog := logger.With(slog.String("local_client", conn.RemoteAddr().String()))
 
-	tsConn, err := dialTsnet(ctx, srv, "tcp", rule.DstAddr)
+	// Resolve MagicDNS / split-DNS names through the tailnet resolver before
+	// dialing; tsnet's own Dial cannot resolve custom split-DNS suffixes.
+	dstAddr := rule.DstAddr
+	if resolved, rerr := resolveDialAddr(ctx, srv, rule.DstAddr); rerr != nil {
+		clog.Debug("failed to resolve dst via tailnet dns, dialing name directly",
+			slog.String("dst", rule.DstAddr), slog.String("error", rerr.Error()))
+	} else {
+		dstAddr = resolved
+	}
+
+	tsConn, err := dialTsnet(ctx, srv, "tcp", dstAddr)
 	if err != nil {
 		clog.Error("failed to dial tailscale", "error", err)
 		conn.Close()
@@ -118,7 +128,7 @@ func handleTCPConnect(ctx context.Context, srv *tsnet.Server, conn net.Conn, rul
 	})
 	defer stop()
 
-	clog.Info("accepted connection", slog.String("dst_addr", rule.DstAddr))
+	clog.Info("accepted connection", slog.String("dst_addr", rule.DstAddr), slog.String("resolved", dstAddr))
 	toConn, toTs := pipeConns(conn, tsConn)
 	clog.Info("connection closed", slog.Int64("ts_rx_bytes", toTs), slog.Int64("ts_tx_bytes", toConn))
 }
