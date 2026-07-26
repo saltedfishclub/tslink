@@ -229,8 +229,40 @@ func TestShotsDiag(t *testing.T) {
 	a.current = pageDiag
 	st := readyState(t)
 	a.diag.report = diagShotReport()
-	shoot(t, th, "diag-udp", image.Pt(1120, 900), func(gtx C) D {
-		return a.diag.Layout(a, gtx, st)
+
+	// The chip rows carry status in tinted fills and vector marks, both of
+	// which are theme- and language-sensitive: a tint that reads fine on the
+	// dark background can wash out on the light one, and the English labels are
+	// long enough to change where the rows wrap. Shoot all three.
+	for _, v := range []struct {
+		name string
+		dark bool
+		lang Lang
+	}{
+		{"diag-udp", true, LangZH},
+		{"diag-light", false, LangZH},
+		{"diag-en", true, LangEN},
+	} {
+		th.SetDark(v.dark)
+		th.Lang = v.lang
+		shoot(t, th, v.name, image.Pt(1120, 900), func(gtx C) D {
+			return a.diag.Layout(a, gtx, st)
+		})
+	}
+	th.SetDark(true)
+	th.Lang = LangZH
+
+	// The pre-run state: no report, so no chip rows and nothing to hide yet.
+	idle := shotApp(t, th)
+	idle.current = pageDiag
+	shoot(t, th, "diag-idle", image.Pt(1120, 420), func(gtx C) D {
+		return idle.diag.Layout(idle, gtx, st)
+	})
+
+	// Settings now owns the geolocation toggle, which the results card used to
+	// carry; if it did not land here it would be unreachable after a first run.
+	shoot(t, th, "settings", image.Pt(1120, 560), func(gtx C) D {
+		return a.settings.Layout(a, gtx, st)
 	})
 }
 
@@ -248,9 +280,11 @@ func diagShotReport() *netdiag.Report {
 				{Host: "stun.miwifi.com:3478", Target: "111.206.174.2:3478", Name: "小米",
 					Region: netdiag.RegionCN, OK: true, RTT: 12 * time.Millisecond,
 					Mapped: netip.MustParseAddrPort("1.2.3.4:54321")},
+				// V6OK below is false, so the v6 probe has to fail too — an
+				// incoherent fixture makes the family hint read "0 reachable"
+				// and "1/1 responded" at the same time.
 				{Host: "stun.miwifi.com:3478", Target: "[2408::1]:3478", Name: "小米",
-					Region: netdiag.RegionCN, OK: true, RTT: 15 * time.Millisecond,
-					Mapped: netip.MustParseAddrPort("[2001:db8::9]:54321")},
+					Region: netdiag.RegionCN, Err: "network unreachable"},
 				{Host: "stun.chat.bilibili.com:3478", Target: "203.107.1.33:3478", Name: "哔哩哔哩",
 					Region: netdiag.RegionCN, OK: true, RTT: 21 * time.Millisecond,
 					Mapped: netip.MustParseAddrPort("1.2.3.4:54322")},
@@ -260,8 +294,25 @@ func diagShotReport() *netdiag.Report {
 		},
 		NAT: netdiag.NATReport{
 			Status: netdiag.StatusOK, Type: netdiag.NATFullCone,
-			Mapping:   netdiag.BehaviorEndpointIndependent,
-			Filtering: netdiag.BehaviorUnknown,
+			Mapping:        netdiag.BehaviorEndpointIndependent,
+			Filtering:      netdiag.BehaviorEndpointIndependent,
+			Hairpin:        shotBool(true),
+			PortPreserving: shotBool(false),
+		},
+		// A router that answers UPnP but neither of the other two: the mixed
+		// case, so the environment row has to render all three marks.
+		PortMap: netdiag.PortMapReport{
+			Status: netdiag.StatusOK, Gateway: netip.MustParseAddr("192.168.1.1"),
+			UPnP:   netdiag.ServiceProbe{Available: true, Detail: "Archer AX73 (TP-Link)"},
+			NATPMP: netdiag.ServiceProbe{Err: "timeout"},
+			PCP:    netdiag.ServiceProbe{Err: "timeout"},
+		},
+		Tailscale: netdiag.TailscaleReport{
+			Available: true, UDP: true, IPv4: true, Status: netdiag.StatusOK,
+			Summary: "首选 DERP tok", PreferredDERP: "tok",
+			DERP: []netdiag.DERPLatency{
+				{RegionID: 1, RegionCode: "tok", Name: "Tokyo", Latency: 40 * time.Millisecond, Preferred: true},
+			},
 		},
 		Overseas: netdiag.OverseasReport{Status: netdiag.StatusOK, Summary: "境外可达"},
 		Egress: netdiag.EgressReport{
@@ -279,8 +330,13 @@ func diagShotReport() *netdiag.Report {
 	eg.Summary = "出口 IP 不一致：IPv4 有 2 个（1.2.3.4、5.6.7.8），仅 HTTP 探测存在差异"
 	rep.Status = netdiag.StatusWarn
 	rep.Headline = "仅 HTTP 探测到多个出口 IP，代理或分流工具可能影响连接"
+	// The card accent follows the headline's own severity, so the fixture has
+	// to carry it; leaving it zero would paint a warning sentence as neutral.
+	rep.HeadlineStatus = netdiag.StatusWarn
 	return rep
 }
+
+func shotBool(v bool) *bool { return &v }
 
 // shotPeers fabricates eight linked peers with ~30 seconds of history each —
 // the short-uptime case the chart used to render almost entirely blank, and

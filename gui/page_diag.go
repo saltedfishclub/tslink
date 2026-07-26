@@ -2,6 +2,7 @@ package gui
 
 import (
 	"context"
+	"image"
 	"net/netip"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"gioui.org/font"
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/text"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -24,6 +26,9 @@ type diagPage struct {
 
 	runBtn  widget.Clickable
 	copyBtn widget.Clickable
+	// skipGeo is owned here because the run reads it, but it is presented on
+	// the settings page — it is a privacy choice about the next run, not a
+	// finding about this one.
 	skipGeo widget.Bool
 
 	// mu guards everything the background run writes.
@@ -167,9 +172,17 @@ func (p *diagPage) controlCard(a *App, gtx C, running bool, rep *netdiag.Report,
 	th := a.th
 	card := th.Card()
 	if rep != nil {
-		accent := th.StatusColor(diagLevel(rep.Status))
+		// The accent tracks the headline's own severity, not Report.Status.
+		// Report.Status is the worst of every section, so one router without
+		// UPnP painted the whole card amber underneath a sentence saying the
+		// network was fine — the accent and the words have to agree.
+		accent := th.StatusColor(diagLevel(rep.HeadlineStatus))
 		card.Accent = &accent
 	}
+	// Once a report exists the run's own scaffolding has nothing left to say:
+	// the step list has been replaced by the chip rows, and the geolocation
+	// toggle only applies to the next run.
+	settled := rep != nil && !running
 
 	return card.Layout(th, gtx, func(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -199,10 +212,10 @@ func (p *diagPage) controlCard(a *App, gtx C, running bool, rep *netdiag.Report,
 								if lastRun.IsZero() {
 									return D{}
 								}
+								// Only when, not how long: the run duration is a
+								// property of the probe schedule, not of the network
+								// being probed, so it told the user nothing.
 								txt := th.T(KDiagLastRun) + " " + RelTime(th, lastRun, time.Now())
-								if rep != nil {
-									txt += " · " + FormatLatency(rep.Duration)
-								}
 								return layout.Inset{Top: 2}.Layout(gtx, th.Caption(txt).Layout)
 							}),
 						)
@@ -237,26 +250,33 @@ func (p *diagPage) controlCard(a *App, gtx C, running bool, rep *netdiag.Report,
 				)
 			}),
 			layout.Rigid(func(gtx C) D {
-				if !running && len(progress) == 0 {
+				if rep == nil {
+					return D{}
+				}
+				return layout.Inset{Top: SpaceMD}.Layout(gtx, func(gtx C) D {
+					labelW := p.summaryLabelWidth(a, gtx)
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx C) D {
+							return p.summaryRow(a, gtx, labelW, th.T(KDiagGroupConn), connChips(th, rep))
+						}),
+						VGap(SpaceSM),
+						layout.Rigid(func(gtx C) D {
+							return p.summaryRow(a, gtx, labelW, th.T(KDiagGroupEnv), envChips(th, rep))
+						}),
+					)
+				})
+			}),
+			layout.Rigid(func(gtx C) D {
+				if settled || (!running && len(progress) == 0) {
 					return D{}
 				}
 				return layout.Inset{Top: SpaceMD}.Layout(gtx, func(gtx C) D {
 					return p.progressList(a, gtx, progress, running)
 				})
 			}),
-			layout.Rigid(func(gtx C) D {
-				return layout.Inset{Top: SpaceMD}.Layout(gtx, func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D {
-							return th.Toggle(gtx, &p.skipGeo, th.T(KDiagSkipGeo))
-						}),
-						HGap(SpaceMD),
-						layout.Flexed(1, func(gtx C) D {
-							return OneLine(th.Caption(th.T(KDiagSkipGeoHint))).Layout(gtx)
-						}),
-					)
-				})
-			}),
+			// The geolocation toggle lives on the settings page: it is run
+			// configuration, not a result, and this card is only about results
+			// once one exists.
 		)
 	})
 }
@@ -299,6 +319,253 @@ func (p *diagPage) progressList(a *App, gtx C, progress []netdiag.Progress, runn
 		}))
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+// ---------------------------------------------------------------------------
+// Summary rows
+// ---------------------------------------------------------------------------
+
+// summaryChip is one reading in the grouped rows at the top of the page.
+//
+// Level and Mark are separate because colour and glyph answer different
+// questions. A missing IPv6 is a real "no" — it earns a cross — but on most
+// Chinese home lines it is also entirely normal, so painting it red would train
+// the reader to ignore the colour on the rows that do matter.
+type summaryChip struct {
+	Label string
+	Value string
+	Level StatusLevel
+	Mark  StatusLevel
+}
+
+// chip builds a reading whose colour and glyph agree.
+func chip(label string, level StatusLevel) summaryChip {
+	return summaryChip{Label: label, Level: level, Mark: level}
+}
+
+// yesNo grades a plain boolean, using fail when false.
+func yesNo(label string, ok bool) summaryChip {
+	if ok {
+		return chip(label, LevelOK)
+	}
+	return chip(label, LevelFail)
+}
+
+// triChip grades a tri-state, leaving nil as an explicit "not determined"
+// rather than folding it into "no".
+func triChip(label string, v *bool) summaryChip {
+	switch {
+	case v == nil:
+		return chip(label, LevelNeutral)
+	case *v:
+		return chip(label, LevelOK)
+	default:
+		return chip(label, LevelWarn)
+	}
+}
+
+// connChips answers "what can this machine reach".
+func connChips(th *Theme, r *netdiag.Report) []summaryChip {
+	out := []summaryChip{
+		yesNo(th.T(KDiagChipUDP), r.UDP.V4OK || r.UDP.V6OK),
+		yesNo("IPv4", r.UDP.V4OK),
+	}
+
+	v6 := yesNo("IPv6", r.UDP.V6OK)
+	if !r.UDP.V6OK {
+		v6.Level = LevelNeutral
+	}
+	out = append(out, v6)
+
+	out = append(out, chip(th.T(KDiagChipOverseas), diagLevel(r.Overseas.Status)))
+
+	// DERP is tailscale's own reading; without it the row must say "unknown",
+	// not "broken".
+	derp := summaryChip{Label: "DERP", Level: LevelNeutral, Mark: LevelNeutral}
+	if r.Tailscale.Available && r.Tailscale.PreferredDERP != "" {
+		derp.Value = r.Tailscale.PreferredDERP
+		derp.Level, derp.Mark = LevelOK, LevelOK
+	}
+	out = append(out, derp)
+
+	// One egress address is the precondition for hole punching. A split seen
+	// only over HTTP is a warning; a split STUN itself observed is a failure.
+	egress := LevelOK
+	switch {
+	case r.Egress.DivergentSTUN:
+		egress = LevelFail
+	case r.Egress.Divergent:
+		egress = LevelWarn
+	}
+	return append(out, chip(th.T(KDiagChipEgressOne), egress))
+}
+
+// envChips answers "what does the local network let us do".
+func envChips(th *Theme, r *netdiag.Report) []summaryChip {
+	nat := summaryChip{
+		Label: natTypeLabel(th, r.NAT.Type),
+		Level: diagLevel(r.NAT.Status),
+		Mark:  diagLevel(r.NAT.Status),
+	}
+	out := []summaryChip{
+		nat,
+		yesNo(th.T(KDiagUPnP), r.PortMap.UPnP.Available),
+		yesNo(th.T(KDiagNATPMP), r.PortMap.NATPMP.Available),
+		yesNo(th.T(KDiagPCP), r.PortMap.PCP.Available),
+		triChip(th.T(KDiagNatHairpin), r.NAT.Hairpin),
+		triChip(th.T(KDiagNatPortPreserve), r.NAT.PortPreserving),
+	}
+	// A captive portal is an alarm, not a routine reading: show it only when
+	// one was actually detected, so its presence is the signal.
+	if r.Tailscale.CaptivePortal != nil && *r.Tailscale.CaptivePortal {
+		out = append(out, chip(th.T(KDiagCaptivePortal), LevelFail))
+	}
+	return out
+}
+
+// chipRow lays readings out left to right, wrapping into the available width.
+// This is the card body's answer to a KVList: the same facts, but packed across
+// the card instead of one per line down an otherwise empty column.
+func (p *diagPage) chipRow(a *App, gtx C, chips []summaryChip) D {
+	th := a.th
+	if len(chips) == 0 {
+		return D{}
+	}
+	items := make([]layout.Widget, 0, len(chips))
+	for _, c := range chips {
+		items = append(items, func(gtx C) D {
+			return layout.Inset{Right: SpaceSM, Bottom: 3}.Layout(gtx, func(gtx C) D {
+				return th.Chip(gtx, ChipStyle{
+					Text:  c.Label,
+					Value: c.Value,
+					Level: c.Level,
+					Icon:  StatusIcon(c.Mark),
+				})
+			})
+		})
+	}
+	return WrapRow(gtx, 3, items)
+}
+
+// measureWidth reports the width a widget wants, without drawing it.
+//
+// The recorded ops are discarded rather than replayed, so this costs one layout
+// pass and paints nothing.
+func measureWidth(gtx C, w layout.Widget) int {
+	gtx.Constraints.Min = image.Point{}
+	m := op.Record(gtx.Ops)
+	dims := w(gtx)
+	m.Stop()
+	return dims.Size.X
+}
+
+// summaryLabelWidth is the shared width of the two group labels: the wider of
+// them, so the rows line up and neither is ellipsised.
+//
+// A fixed width cannot work here. "连通性" is three glyphs and "Connectivity" is
+// twelve, so any constant that keeps the Chinese layout tight truncates the
+// English one — which is exactly what a hardcoded 52dp did.
+func (p *diagPage) summaryLabelWidth(a *App, gtx C) int {
+	th := a.th
+	w := 0
+	for _, k := range []Key{KDiagGroupConn, KDiagGroupEnv} {
+		if n := measureWidth(gtx, th.Secondary(th.T(k)).Layout); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
+// summaryRow renders a labelled chip row that wraps into the card's full width
+// instead of running off the right edge.
+func (p *diagPage) summaryRow(a *App, gtx C, labelW int, label string, chips []summaryChip) D {
+	th := a.th
+	if len(chips) == 0 {
+		return D{}
+	}
+	return layout.Flex{Alignment: layout.Start}.Layout(gtx,
+		layout.Rigid(func(gtx C) D {
+			gtx.Constraints.Min.X, gtx.Constraints.Max.X = labelW, labelW
+			return layout.Inset{Top: 4}.Layout(gtx, OneLine(th.Secondary(label)).Layout)
+		}),
+		HGap(SpaceSM),
+		layout.Flexed(1, func(gtx C) D { return p.chipRow(a, gtx, chips) }),
+	)
+}
+
+// hintList renders the "so what does that cost me" prose under a chip row.
+//
+// Only readings that are not OK get one. Packing the facts into chips is what
+// buys the space back, but a chip has no room for the consequence, and the
+// consequence is the part a non-expert actually needs — so it is kept exactly
+// where it still earns its line and dropped where it only said "this is fine".
+func (p *diagPage) hintList(a *App, gtx C, hints []string) D {
+	th := a.th
+	if len(hints) == 0 {
+		return D{}
+	}
+	return layout.Inset{Top: SpaceSM}.Layout(gtx, func(gtx C) D {
+		children := make([]layout.FlexChild, 0, len(hints))
+		for _, h := range hints {
+			children = append(children, layout.Rigid(func(gtx C) D {
+				l := th.Caption("· " + h)
+				l.MaxLines = 2
+				return l.Layout(gtx)
+			}))
+		}
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	})
+}
+
+// triValueChip renders a tri-state as label + 是/否/未知.
+func triValueChip(th *Theme, label string, v *bool) summaryChip {
+	c := triChip(label, v)
+	switch {
+	case v == nil:
+		c.Value = th.T(KUnknown)
+	case *v:
+		c.Value = th.T(KYes)
+	default:
+		c.Value = th.T(KNo)
+	}
+	return c
+}
+
+// behaviorLevel grades an RFC 5780 behaviour by what it costs hole punching.
+func behaviorLevel(b netdiag.Behavior) StatusLevel {
+	switch b {
+	case netdiag.BehaviorEndpointIndependent:
+		return LevelOK
+	case netdiag.BehaviorAddressDependent:
+		return LevelWarn
+	case netdiag.BehaviorAddressAndPortDependent:
+		return LevelFail
+	default:
+		return LevelNeutral
+	}
+}
+
+// boolMark picks the glyph for a boolean whose colour has been softened. A
+// false reading still earns a cross even when it is not painted as a problem.
+func boolMark(v bool) StatusLevel {
+	if v {
+		return LevelOK
+	}
+	return LevelFail
+}
+
+// countLevel grades a "reachable / total" pair.
+func countLevel(ok, total int) StatusLevel {
+	switch {
+	case total == 0:
+		return LevelNeutral
+	case ok == 0:
+		return LevelFail
+	case ok < total:
+		return LevelWarn
+	default:
+		return LevelOK
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -521,8 +788,8 @@ func udpFamilyHint(th *Theme, ok, total int) string {
 
 func (p *diagPage) natCard(a *App, gtx C, r netdiag.NATReport) D {
 	th := a.th
-	hairpin, hairpinLvl := p.triLabel(th, r.Hairpin)
-	preserve, preserveLvl := p.triLabel(th, r.PortPreserving)
+	_, hairpinLvl := p.triLabel(th, r.Hairpin)
+	_, preserveLvl := p.triLabel(th, r.PortPreserving)
 
 	return p.sectionCard(a, gtx, IconShield, th.T(KDiagSecNAT), r.Status, r.Summary, func(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -536,12 +803,30 @@ func (p *diagPage) natCard(a *App, gtx C, r netdiag.NATReport) D {
 				})
 			}),
 			layout.Rigid(func(gtx C) D {
-				return th.KVList(gtx, []KV{
-					{Key: th.T(KDiagNatMapping), Value: behaviorLabel(th, r.Mapping), Hint: behaviorHint(th, r.Mapping)},
-					{Key: th.T(KDiagNatFiltering), Value: behaviorLabel(th, r.Filtering), Hint: behaviorHint(th, r.Filtering)},
-					{Key: th.T(KDiagNatHairpin), Value: hairpin, Level: hairpinLvl, Hint: hairpinHint(th, r.Hairpin)},
-					{Key: th.T(KDiagNatPortPreserve), Value: preserve, Level: preserveLvl, Hint: preserveHint(th, r.PortPreserving)},
+				return p.chipRow(a, gtx, []summaryChip{
+					{Label: th.T(KDiagNatMapping), Value: behaviorLabel(th, r.Mapping),
+						Level: behaviorLevel(r.Mapping), Mark: behaviorLevel(r.Mapping)},
+					{Label: th.T(KDiagNatFiltering), Value: behaviorLabel(th, r.Filtering),
+						Level: behaviorLevel(r.Filtering), Mark: behaviorLevel(r.Filtering)},
+					triValueChip(th, th.T(KDiagNatHairpin), r.Hairpin),
+					triValueChip(th, th.T(KDiagNatPortPreserve), r.PortPreserving),
 				})
+			}),
+			layout.Rigid(func(gtx C) D {
+				var hints []string
+				if behaviorLevel(r.Mapping) != LevelOK {
+					hints = append(hints, th.T(KDiagNatMapping)+" — "+behaviorHint(th, r.Mapping))
+				}
+				if behaviorLevel(r.Filtering) != LevelOK {
+					hints = append(hints, th.T(KDiagNatFiltering)+" — "+behaviorHint(th, r.Filtering))
+				}
+				if hairpinLvl != LevelOK {
+					hints = append(hints, th.T(KDiagNatHairpin)+" — "+hairpinHint(th, r.Hairpin))
+				}
+				if preserveLvl != LevelOK {
+					hints = append(hints, th.T(KDiagNatPortPreserve)+" — "+preserveHint(th, r.PortPreserving))
+				}
+				return p.hintList(a, gtx, hints)
 			}),
 			layout.Rigid(func(gtx C) D {
 				if len(r.MappedAddrs) == 0 {
@@ -718,30 +1003,35 @@ func (p *diagPage) udpCard(a *App, gtx C, r netdiag.UDPReport) D {
 	v4ok, v4n, v6ok, v6n := udpFamilyStats(r)
 
 	return p.sectionCard(a, gtx, IconGlobe, th.T(KDiagSecUDP), r.Status, r.Summary, func(gtx C) D {
-		rows := []KV{
-			{Key: th.T(KDiagUdpV4), Value: v4, Level: v4lvl, Hint: udpFamilyHint(th, v4ok, v4n)},
-			{Key: th.T(KDiagUdpV6), Value: v6, Level: v6lvl, Hint: udpFamilyHint(th, v6ok, v6n)},
-			{
-				Key: "国内 / 境外",
-				Value: itoa(r.CNReachable) + "/" + itoa(r.CNTotal) + "   " +
-					itoa(r.IntlReachabl) + "/" + itoa(r.IntlTotal),
-				Mono: true,
-				Hint: reachHint(th),
-			},
-		}
+		cn, intl := "国内", "境外"
 		if th.Lang != LangZH {
-			rows[2].Key = "CN / International"
+			cn, intl = "CN", "International"
+		}
+		chips := []summaryChip{
+			{Label: th.T(KDiagUdpV4), Value: v4, Level: v4lvl, Mark: v4lvl},
+			{Label: th.T(KDiagUdpV6), Value: v6, Level: v6lvl, Mark: boolMark(r.V6OK)},
+			{Label: cn, Value: itoa(r.CNReachable) + "/" + itoa(r.CNTotal),
+				Level: countLevel(r.CNReachable, r.CNTotal), Mark: countLevel(r.CNReachable, r.CNTotal)},
+			{Label: intl, Value: itoa(r.IntlReachabl) + "/" + itoa(r.IntlTotal),
+				Level: countLevel(r.IntlReachabl, r.IntlTotal), Mark: countLevel(r.IntlReachabl, r.IntlTotal)},
 		}
 		if len(r.BlockedPorts) > 0 {
-			rows = append(rows, KV{
-				Key:   th.T(KDiagUdpPortsBlocked),
-				Value: joinInts(r.BlockedPorts),
-				Mono:  true,
-				Level: LevelWarn,
+			chips = append(chips, summaryChip{
+				Label: th.T(KDiagUdpPortsBlocked), Value: joinInts(r.BlockedPorts),
+				Level: LevelWarn, Mark: LevelWarn,
 			})
 		}
+		var hints []string
+		if !r.V4OK {
+			hints = append(hints, th.T(KDiagUdpV4)+" — "+udpFamilyHint(th, v4ok, v4n))
+		}
+		if !r.V6OK {
+			hints = append(hints, th.T(KDiagUdpV6)+" — "+udpFamilyHint(th, v6ok, v6n))
+		}
+		hints = append(hints, reachHint(th))
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(func(gtx C) D { return th.KVList(gtx, rows) }),
+			layout.Rigid(func(gtx C) D { return p.chipRow(a, gtx, chips) }),
+			layout.Rigid(func(gtx C) D { return p.hintList(a, gtx, hints) }),
 			layout.Rigid(func(gtx C) D {
 				if len(r.Probes) == 0 {
 					return D{}
@@ -786,15 +1076,15 @@ func joinInts(v []int) string {
 func (p *diagPage) portMapCard(a *App, gtx C, r netdiag.PortMapReport) D {
 	th := a.th
 	return p.sectionCard(a, gtx, IconRouter, th.T(KDiagSecPortMap), r.Status, r.Summary, func(gtx C) D {
+		chips := []summaryChip{
+			serviceChip(th, th.T(KDiagUPnP), r.UPnP),
+			serviceChip(th, th.T(KDiagNATPMP), r.NATPMP),
+			serviceChip(th, th.T(KDiagPCP), r.PCP),
+		}
 		rows := []KV{}
 		if r.Gateway.IsValid() {
 			rows = append(rows, KV{Key: th.T(KDiagGateway), Value: r.Gateway.String(), Mono: true})
 		}
-		rows = append(rows,
-			serviceKV(th, th.T(KDiagUPnP), r.UPnP),
-			serviceKV(th, th.T(KDiagNATPMP), r.NATPMP),
-			serviceKV(th, th.T(KDiagPCP), r.PCP),
-		)
 		for _, s := range []netdiag.ServiceProbe{r.UPnP, r.NATPMP, r.PCP} {
 			if s.ExternalIP.IsValid() {
 				rows = append(rows, KV{
@@ -805,20 +1095,46 @@ func (p *diagPage) portMapCard(a *App, gtx C, r netdiag.PortMapReport) D {
 				break
 			}
 		}
-		return th.KVList(gtx, rows)
+		// The per-service detail — router model, or why the probe failed — is
+		// what makes this card actionable, so it survives the move to chips.
+		var hints []string
+		for _, s := range []struct {
+			name  string
+			probe netdiag.ServiceProbe
+		}{
+			{th.T(KDiagUPnP), r.UPnP},
+			{th.T(KDiagNATPMP), r.NATPMP},
+			{th.T(KDiagPCP), r.PCP},
+		} {
+			detail := s.probe.Detail
+			if detail == "" {
+				detail = s.probe.Err
+			}
+			if detail != "" {
+				hints = append(hints, s.name+" — "+Truncate(detail, 70))
+			}
+		}
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx C) D { return p.chipRow(a, gtx, chips) }),
+			layout.Rigid(func(gtx C) D { return p.hintList(a, gtx, hints) }),
+			layout.Rigid(func(gtx C) D {
+				if len(rows) == 0 {
+					return D{}
+				}
+				return layout.Inset{Top: SpaceSM}.Layout(gtx, func(gtx C) D {
+					return th.KVList(gtx, rows)
+				})
+			}),
+		)
 	})
 }
 
-func serviceKV(th *Theme, name string, s netdiag.ServiceProbe) KV {
+func serviceChip(th *Theme, name string, s netdiag.ServiceProbe) summaryChip {
 	val, level := th.T(KUnsupported), LevelWarn
 	if s.Available {
 		val, level = th.T(KSupported), LevelOK
 	}
-	hint := s.Detail
-	if hint == "" {
-		hint = s.Err
-	}
-	return KV{Key: name, Value: val, Level: level, Hint: Truncate(hint, 60)}
+	return summaryChip{Label: name, Value: val, Level: level, Mark: level}
 }
 
 func (p *diagPage) overseasCard(a *App, gtx C, r netdiag.OverseasReport) D {
@@ -1032,15 +1348,6 @@ func (p *diagPage) tailscaleCard(a *App, gtx C, r netdiag.TailscaleReport) D {
 		if !r.Available {
 			return th.EmptyState(gtx, IconNodes, orDash(r.Err), "")
 		}
-		upnp, upnpLvl := p.triLabel(th, r.UPnP)
-		pmp, pmpLvl := p.triLabel(th, r.PMP)
-		pcp, pcpLvl := p.triLabel(th, r.PCP)
-		varies, variesLvl := p.triLabel(th, r.MappingVariesByDestIP)
-		if r.MappingVariesByDestIP != nil && *r.MappingVariesByDestIP {
-			variesLvl = LevelWarn
-		} else if r.MappingVariesByDestIP != nil {
-			variesLvl = LevelOK
-		}
 		portal, portalLvl := p.triLabel(th, r.CaptivePortal)
 		if r.CaptivePortal != nil && *r.CaptivePortal {
 			portalLvl = LevelFail
@@ -1050,11 +1357,7 @@ func (p *diagPage) tailscaleCard(a *App, gtx C, r netdiag.TailscaleReport) D {
 
 		rows := []KV{
 			{Key: th.T(KDiagPreferredDERP), Value: orDash(r.PreferredDERP)},
-			{Key: th.T(KDiagMappingVaries), Value: varies, Level: variesLvl},
 			{Key: th.T(KDiagCaptivePortal), Value: portal, Level: portalLvl},
-			{Key: th.T(KDiagUPnP) + " / " + th.T(KDiagNATPMP) + " / " + th.T(KDiagPCP),
-				Value: upnp + " · " + pmp + " · " + pcp,
-				Level: worstLevel(upnpLvl, pmpLvl, pcpLvl)},
 		}
 		if r.GlobalV4 != "" {
 			rows = append(rows, KV{Key: "GlobalV4", Value: r.GlobalV4, Mono: true})
@@ -1097,17 +1400,6 @@ func (p *diagPage) tailscaleCard(a *App, gtx C, r netdiag.TailscaleReport) D {
 			}),
 		)
 	})
-}
-
-func worstLevel(ls ...StatusLevel) StatusLevel {
-	rank := map[StatusLevel]int{LevelOK: 0, LevelNeutral: 1, LevelInfo: 1, LevelWarn: 2, LevelFail: 3}
-	worst := LevelOK
-	for _, l := range ls {
-		if rank[l] > rank[worst] {
-			worst = l
-		}
-	}
-	return worst
 }
 
 // callout is an inline banner for a finding that needs a sentence of

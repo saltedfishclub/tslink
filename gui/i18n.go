@@ -170,9 +170,13 @@ const (
 	KDiagPreferredDERP
 	KDiagDerpLatency
 	KDiagCaptivePortal
-	KDiagMappingVaries
 	KDiagSkipGeo
 	KDiagSkipGeoHint
+	KDiagGroupConn
+	KDiagGroupEnv
+	KDiagChipOverseas
+	KDiagChipEgressOne
+	KDiagChipUDP
 
 	// NAT names.
 	KNatOpen
@@ -359,9 +363,13 @@ var zhStrings = [kCount]string{
 	KDiagPreferredDERP:       "首选 DERP",
 	KDiagDerpLatency:         "DERP 延迟",
 	KDiagCaptivePortal:       "门户劫持",
-	KDiagMappingVaries:       "映射随目标变化",
 	KDiagSkipGeo:             "不查询归属地",
 	KDiagSkipGeoHint:         "归属地查询会把你的公网 IP 发送给第三方服务",
+	KDiagGroupConn:           "连通性",
+	KDiagGroupEnv:            "环境",
+	KDiagChipOverseas:        "海外",
+	KDiagChipEgressOne:       "出口一致",
+	KDiagChipUDP:             "UDP",
 
 	KNatOpen:           "开放网络",
 	KNatFullCone:       "完全锥形",
@@ -543,9 +551,13 @@ var enStrings = [kCount]string{
 	KDiagPreferredDERP:       "Preferred DERP",
 	KDiagDerpLatency:         "DERP latency",
 	KDiagCaptivePortal:       "Captive portal",
-	KDiagMappingVaries:       "Mapping varies by destination",
 	KDiagSkipGeo:             "Skip geolocation",
 	KDiagSkipGeoHint:         "Geolocation sends your public IP to a third-party service",
+	KDiagGroupConn:           "Connectivity",
+	KDiagGroupEnv:            "Environment",
+	KDiagChipOverseas:        "Overseas",
+	KDiagChipEgressOne:       "Single egress",
+	KDiagChipUDP:             "UDP",
 
 	KNatOpen:           "Open internet",
 	KNatFullCone:       "Full cone",

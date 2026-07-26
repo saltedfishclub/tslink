@@ -353,25 +353,31 @@ type DERPLatency struct {
 // TailscaleReport mirrors the parts of tailscale's netcheck report that are
 // useful here. Tri-state fields are nil when tailscale could not determine
 // them.
+//
+// Tailscale's own UPnP/PMP/PCP verdicts are deliberately absent: netcheck only
+// fills them when its port mapper happens to have run, so in practice they were
+// permanently nil and rendered as "未知" forever. [PortMapReport] carries the
+// result of this package's own active probe instead, which actually answers.
+//
+// Its MappingVariesByDestIP is gone for a different reason: [NATReport] measures
+// mapping behaviour directly and in more detail (RFC 5780 tells address- from
+// address-and-port-dependent; netcheck's boolean cannot), so carrying both only
+// gave the reader two places to look and a chance for them to disagree.
 type TailscaleReport struct {
-	Available             bool
-	UDP                   bool
-	IPv4                  bool
-	IPv6                  bool
-	ICMPv4                bool
-	OSHasIPv6             bool
-	MappingVariesByDestIP *bool
-	UPnP                  *bool
-	PMP                   *bool
-	PCP                   *bool
-	CaptivePortal         *bool
-	GlobalV4              string
-	GlobalV6              string
-	PreferredDERP         string
-	DERP                  []DERPLatency
-	Status                Status
-	Summary               string
-	Err                   string
+	Available     bool
+	UDP           bool
+	IPv4          bool
+	IPv6          bool
+	ICMPv4        bool
+	OSHasIPv6     bool
+	CaptivePortal *bool
+	GlobalV4      string
+	GlobalV6      string
+	PreferredDERP string
+	DERP          []DERPLatency
+	Status        Status
+	Summary       string
+	Err           string
 }
 
 // TailscaleSource supplies tailscale's internal network view. The GUI wires

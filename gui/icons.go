@@ -242,6 +242,22 @@ func IconCheck(gtx C, size int, col color.NRGBA) D {
 	})
 }
 
+// IconCross marks a failed or unsupported check. It pairs with [IconCheck] at
+// the same stroke weight so a row mixing the two reads as one set.
+func IconCross(gtx C, size int, col color.NRGBA) D {
+	return iconCanvas(gtx, size, col, 0.11, func(p *clip.Path, pt func(x, y float32) f32.Point) {
+		line(p, pt, 0.24, 0.24, 0.76, 0.76)
+		line(p, pt, 0.76, 0.24, 0.24, 0.76)
+	})
+}
+
+// IconDash marks a check whose answer is unknown, as distinct from a "no".
+func IconDash(gtx C, size int, col color.NRGBA) D {
+	return iconCanvas(gtx, size, col, 0.11, func(p *clip.Path, pt func(x, y float32) f32.Point) {
+		line(p, pt, 0.22, 0.5, 0.78, 0.5)
+	})
+}
+
 // IconWarn marks a warning.
 func IconWarn(gtx C, size int, col color.NRGBA) D {
 	d := iconCanvas(gtx, size, col, defaultStroke, func(p *clip.Path, pt func(x, y float32) f32.Point) {

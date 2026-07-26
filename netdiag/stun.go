@@ -84,6 +84,15 @@ const (
 	stunHairpinTimeout = 1500 * time.Millisecond
 	stunMaxInFlight    = 8
 	natTotalBudget     = 20 * time.Second
+	// natFilteringMaxServers caps how many servers the filtering test may
+	// interrogate. Each one costs up to two full CHANGE-REQUEST timeouts, and
+	// the whole classification shares natTotalBudget with the mapping tests.
+	natFilteringMaxServers = 3
+	// natFilteringMaxProbes caps the plain bindings spent looking for a server
+	// that advertises an OTHER-ADDRESS. Without it a line where most targets
+	// are dead would spend the entire budget discovering that, starving the
+	// stages that run after ClassifyNAT.
+	natFilteringMaxProbes = 4
 )
 
 var (
@@ -314,6 +323,31 @@ func stunBindingRequestMsg(change byte) *stunMessage {
 		m.Attrs = append(m.Attrs, stunAttr{Type: stunAttrChangeRequest, Value: v})
 	}
 	return m
+}
+
+// stunChangeHonoured reports whether a reply to a CHANGE-REQUEST really came
+// back from the transport address the request asked for.
+//
+// "Not from dst" is too weak a test. A server that ignores CHANGE-REQUEST
+// answers from dst, but a middlebox — or a server that implements only half the
+// attribute — may answer from the *same IP on another port* even though
+// CHANGE-IP was set. Accepting that as success reports endpoint-independent
+// filtering, i.e. a full-cone NAT, for a line that is really port-restricted:
+// the error points at "hole punching will work" when it will not.
+//
+// So each requested flag is checked as its own dimension, and the flags that
+// were *not* requested must not have changed either.
+func stunChangeHonoured(change byte, dst, from netip.AddrPort) bool {
+	if !from.IsValid() || change == 0 {
+		return false
+	}
+	if (change&stunChangeIP != 0) != (from.Addr() != dst.Addr()) {
+		return false
+	}
+	if (change&stunChangePort != 0) != (from.Port() != dst.Port()) {
+		return false
+	}
+	return true
 }
 
 // stunResponseFor parses raw and reports whether it is a binding response
@@ -585,7 +619,8 @@ func stunProbeServer(ctx context.Context, srv STUNServer, log *slog.Logger) STUN
 			cctx, ccancel := context.WithTimeout(ctx, stunQuickInterval*time.Duration(stunQuickAttempts+1))
 			crMsg, crFrom, _, crErr := stunQuery(cctx, dst, stunChangeIP|stunChangePort, stunQuickAttempts, stunQuickInterval)
 			ccancel()
-			res.SupportsChangeReq = crErr == nil && crMsg != nil && crFrom != dst
+			res.SupportsChangeReq = crErr == nil && crMsg != nil &&
+				stunChangeHonoured(stunChangeIP|stunChangePort, dst, crFrom)
 		}
 		log.With(
 			slog.String("server", srv.Host),
@@ -833,6 +868,10 @@ type natClassifier struct {
 	localPort uint16
 	rep       *NATReport
 	seen      map[netip.AddrPort]bool
+	// other maps a probed endpoint to the OTHER-ADDRESS it advertised. A key
+	// with an invalid value means "answered, but advertised nothing", which is
+	// what lets filteringBehavior skip it instead of timing out against it.
+	other map[netip.AddrPort]netip.AddrPort
 }
 
 // ClassifyNAT performs RFC 5780 behaviour discovery and maps the result onto
@@ -861,12 +900,19 @@ func ClassifyNAT(ctx context.Context, servers []STUNServer, logger *slog.Logger)
 	}
 	defer conn.Close()
 
-	c := &natClassifier{ctx: ctx, log: log, conn: conn, rep: &rep, seen: map[netip.AddrPort]bool{}}
+	c := &natClassifier{
+		ctx:   ctx,
+		log:   log,
+		conn:  conn,
+		rep:   &rep,
+		seen:  map[netip.AddrPort]bool{},
+		other: map[netip.AddrPort]netip.AddrPort{},
+	}
 	if la, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 		c.localPort = uint16(la.Port)
 	}
 
-	targets := stunResolveTargets(ctx, servers, log)
+	targets := stunResolveTargets(ctx, stunWithRFC5780(servers), log)
 	if len(targets) == 0 {
 		rep.Status = StatusFail
 		rep.Summary = "没有可用的 STUN 服务器地址（DNS 解析全部失败）"
@@ -898,12 +944,9 @@ func ClassifyNAT(ctx context.Context, servers []STUNServer, logger *slog.Logger)
 		rep.Mapping = c.mappingBehavior(targets, primary, firstMsg, firstMapped)
 	}
 
-	// 5. filtering behaviour; needs a real RFC 5780 server.
-	rep.Filtering = c.filteringBehavior()
-	if rep.Filtering == BehaviorUnknown {
-		rep.Notes = append(rep.Notes,
-			"没有 STUN 服务器响应 CHANGE-REQUEST（Google/Cloudflare 等只支持基本绑定请求），无法判定过滤行为")
-	}
+	// 5. filtering behaviour; needs a real RFC 5780 server. It reuses the
+	// targets already resolved above and records its own notes.
+	rep.Filtering = c.filteringBehavior(targets)
 
 	// 6. legacy name.
 	rep.Type = stunLegacyNATType(noNAT, rep.Mapping, rep.Filtering)
@@ -1003,12 +1046,20 @@ func (c *natClassifier) query(t stunTarget, change byte, attempts int, interval 
 		res.Mapped = m
 		c.seen[m] = true
 	}
-	if o, ok := msg.otherAddr(); ok {
+	// Remember what this endpoint advertised, so filteringBehavior can pick the
+	// servers that can actually drive a CHANGE-REQUEST instead of re-probing
+	// blind. An invalid entry records "answered, advertised nothing", which is
+	// just as useful: it lets the filtering pass skip the server outright.
+	if change == 0 {
+		o, _ := msg.otherAddr()
+		c.other[t.dst] = o
+		res.Other = o
+	} else if o, ok := msg.otherAddr(); ok {
 		res.Other = o
 	}
-	// A CHANGE-REQUEST only counts as honoured when the answer really came back
-	// from another transport address.
-	res.SupportsChangeReq = change != 0 && from != t.dst
+	// A CHANGE-REQUEST only counts as honoured when the answer came back from
+	// the transport address the request actually asked for.
+	res.SupportsChangeReq = stunChangeHonoured(change, t.dst, from)
 	c.rep.Results = append(c.rep.Results, res)
 	return msg, from, true
 }
@@ -1159,57 +1210,88 @@ func (c *natClassifier) mappingViaAlternate(base stunTarget, baseMsg *stunMessag
 	return BehaviorAddressAndPortDependent, true
 }
 
+// filteringCandidates orders the endpoints worth spending a CHANGE-REQUEST on.
+//
+// Servers already observed to advertise an OTHER-ADDRESS come first — they are
+// reachable *and* capable, and their plain binding response is already in hand.
+// Targets we have not talked to yet follow. Targets that answered a plain
+// binding without an OTHER-ADDRESS are dropped entirely: they have no second
+// transport address to reply from, so probing them burns two full timeouts and
+// proves nothing.
+func (c *natClassifier) filteringCandidates(targets []stunTarget) []stunTarget {
+	var known, fresh []stunTarget
+	for _, t := range targets {
+		alt, probed := c.other[t.dst]
+		switch {
+		case probed && alt.IsValid():
+			known = append(known, t)
+		case probed:
+			// Answered, advertised nothing: it cannot drive the test.
+		default:
+			fresh = append(fresh, t)
+		}
+	}
+	return append(known, fresh...)
+}
+
 // filteringBehavior runs RFC 5780 tests II and III (CHANGE-REQUEST) against the
 // first server that both answers a plain binding request and advertises
 // OTHER-ADDRESS. Servers that ignore CHANGE-REQUEST are skipped rather than
 // interpreted, because a silent drop is indistinguishable from filtering.
-func (c *natClassifier) filteringBehavior() Behavior {
+//
+// Candidates come from the targets [ClassifyNAT] already resolved and proved
+// reachable. Probing a separate hardcoded list instead — as this used to — makes
+// the test fail on any line where those particular servers are unreachable,
+// DNS-hijacked, or simply dead, *even when a perfectly conforming server in the
+// caller's own list is answering*. Filtering then stays [BehaviorUnknown] and
+// [stunLegacyNATType] reports [NATUnknown] for every NAT on the planet, which is
+// exactly the failure this ordering exists to prevent. [stunWithRFC5780] makes
+// sure the known-conformant servers are part of that target list to begin with.
+func (c *natClassifier) filteringBehavior(targets []stunTarget) Behavior {
 	var (
 		ignoring []string // servers that answered but ignored CHANGE-REQUEST
 		silent   string   // first server that answered plain bindings but no change requests
+		tried    int      // servers actually asked a CHANGE-REQUEST
+		probes   int      // plain bindings spent hunting for an OTHER-ADDRESS
 	)
-	for _, srv := range RFC5780Servers() {
-		if c.ctx.Err() != nil {
+	for _, t := range c.filteringCandidates(targets) {
+		if c.ctx.Err() != nil || tried >= natFilteringMaxServers {
 			break
 		}
-		addrs, port, err := stunResolve(c.ctx, srv.Host)
-		if err != nil {
-			continue
-		}
-		var dst netip.AddrPort
-		for _, a := range addrs {
-			if a.Is4() {
-				dst = netip.AddrPortFrom(a, port)
+		dst := t.dst
+		alt, probed := c.other[dst]
+		if !probed {
+			if probes >= natFilteringMaxProbes {
 				break
 			}
+			probes++
+			msg, _, ok := c.query(t, 0, stunQuickAttempts, stunInterval)
+			if !ok {
+				continue
+			}
+			alt, _ = msg.otherAddr()
 		}
-		if !dst.IsValid() {
-			continue
-		}
-		t := stunTarget{srv: srv, dst: dst}
-		msg, _, ok := c.query(t, 0, stunQuickAttempts, stunInterval)
-		if !ok {
-			continue
-		}
-		if _, has := msg.otherAddr(); !has {
+		if !alt.IsValid() {
 			continue // no alternate address: cannot answer a CHANGE-REQUEST
 		}
+		tried++
 
 		// Test II: ask for a reply from another IP *and* port.
 		//
-		// Three outcomes have to be told apart. A reply from a different
-		// transport address proves the server honoured the request and that
-		// nothing filtered it. A reply from the address we asked proves the
-		// server ignored the attribute, which says nothing about filtering —
+		// Three outcomes have to be told apart. A reply from the transport
+		// address we asked for proves the server honoured the request and that
+		// nothing filtered it. A reply from anywhere else — the original
+		// address, or only half the change applied — proves the server did not
+		// really honour the attribute, which says nothing about filtering;
 		// treating it as "filtered" is how a full-cone NAT ends up reported as
 		// port-restricted. No reply at all is only meaningful once we know the
 		// server honours CHANGE-REQUEST.
 		_, from, ok := c.query(t, stunChangeIP|stunChangePort, stunQuickAttempts, stunQuickInterval)
-		if ok && from != dst {
+		if ok && stunChangeHonoured(stunChangeIP|stunChangePort, dst, from) {
 			return BehaviorEndpointIndependent
 		}
 		if ok {
-			ignoring = append(ignoring, srv.Host)
+			ignoring = append(ignoring, t.srv.Host)
 			continue
 		}
 
@@ -1217,11 +1299,11 @@ func (c *natClassifier) filteringBehavior() Behavior {
 		// server implements CHANGE-REQUEST, which retroactively makes the
 		// silence in test II real evidence of address-dependent filtering.
 		_, from, ok = c.query(t, stunChangePort, stunQuickAttempts, stunQuickInterval)
-		if ok && from != dst {
+		if ok && stunChangeHonoured(stunChangePort, dst, from) {
 			return BehaviorAddressDependent
 		}
 		if ok {
-			ignoring = append(ignoring, srv.Host)
+			ignoring = append(ignoring, t.srv.Host)
 			continue
 		}
 
@@ -1230,7 +1312,7 @@ func (c *natClassifier) filteringBehavior() Behavior {
 		// like. Remember it and keep looking for a server that demonstrably
 		// honours the attribute; only fall back to this if none does.
 		if silent == "" {
-			silent = srv.Host
+			silent = t.srv.Host
 		}
 	}
 
@@ -1242,11 +1324,11 @@ func (c *natClassifier) filteringBehavior() Behavior {
 	}
 	if len(ignoring) > 0 {
 		c.rep.Notes = append(c.rep.Notes, fmt.Sprintf(
-			"%s 忽略了 CHANGE-REQUEST（仍从原地址回包），无法判定过滤行为",
+			"%s 忽略了 CHANGE-REQUEST（未从请求的备用地址回包），无法判定过滤行为",
 			strings.Join(ignoring, "、")))
 	} else {
 		c.rep.Notes = append(c.rep.Notes,
-			"没有可用的 RFC 5780 服务器，无法判定过滤行为")
+			"没有 STUN 服务器通告备用地址并响应 CHANGE-REQUEST（Google/Cloudflare 等只支持基本绑定请求），无法判定过滤行为")
 	}
 	return BehaviorUnknown
 }

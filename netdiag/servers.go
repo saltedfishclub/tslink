@@ -34,22 +34,55 @@ func DefaultSTUNServers() []STUNServer {
 	}
 }
 
-// RFC5780Servers returns the subset of targets known to implement RFC 5780
-// behaviour discovery, i.e. they advertise OTHER-ADDRESS and actually honour
+// RFC5780Servers returns targets known to implement RFC 5780 behaviour
+// discovery, i.e. they advertise OTHER-ADDRESS and actually honour
 // CHANGE-REQUEST by answering from a second IP and/or port.
 //
-// Only these servers can drive the filtering-behaviour test in [ClassifyNAT].
+// Only such servers can drive the filtering-behaviour test in [ClassifyNAT].
 // Most large providers — Google and Cloudflare among them — answer plain
 // binding requests perfectly well but silently ignore CHANGE-REQUEST and never
 // send OTHER-ADDRESS, so a probe against them looks identical to a firewall
 // dropping the reply. Classification therefore has to degrade gracefully: when
-// none of these servers answers, filtering behaviour stays
+// no reachable server honours CHANGE-REQUEST, filtering behaviour stays
 // [BehaviorUnknown] and the NAT type is reported as [NATUnknown] with an
 // explanatory note rather than being guessed.
+//
+// This list is a floor, not a whitelist: [stunWithRFC5780] merges it into
+// whatever server list the caller passed so a custom list of Google/Cloudflare
+// style endpoints still has something to test against, and the filtering pass
+// will happily use any *other* reachable target that turns out to advertise an
+// OTHER-ADDRESS. It must include in-country options — the international
+// entries below are unreachable or DNS-hijacked on a good many networks, and
+// when they were the only candidates the filtering test could never run.
 func RFC5780Servers() []STUNServer {
 	return []STUNServer{
-		{Host: "stun.stunprotocol.org:3478", Name: "StunProtocol", Region: RegionIntl},
+		// Mainland China. Verified to advertise OTHER-ADDRESS and to answer
+		// both CHANGE-REQUEST variants from the advertised alternate.
+		{Host: "stun.miwifi.com:3478", Name: "小米", Region: RegionCN},
+		{Host: "stun.hitv.com:3478", Name: "芒果TV", Region: RegionCN},
+
 		{Host: "stun.sipnet.net:3478", Name: "SipNet", Region: RegionIntl},
 		{Host: "stun.voipgate.com:3478", Name: "VoIPGate", Region: RegionIntl},
+		{Host: "stun.stunprotocol.org:3478", Name: "StunProtocol", Region: RegionIntl},
 	}
+}
+
+// stunWithRFC5780 appends the RFC 5780 servers a caller's list does not already
+// cover, so behaviour discovery always has candidates that can actually drive a
+// CHANGE-REQUEST. They go at the end: the caller's own targets are tried first,
+// and resolution happens in one parallel pass, so the extras cost nothing when
+// the caller's list already works.
+func stunWithRFC5780(servers []STUNServer) []STUNServer {
+	have := make(map[string]bool, len(servers))
+	for _, s := range servers {
+		have[s.Host] = true
+	}
+	out := append([]STUNServer(nil), servers...)
+	for _, s := range RFC5780Servers() {
+		if !have[s.Host] {
+			out = append(out, s)
+			have[s.Host] = true
+		}
+	}
+	return out
 }

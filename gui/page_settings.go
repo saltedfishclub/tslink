@@ -85,6 +85,15 @@ func (p *settingsPage) appearanceCard(a *App, gtx C) D {
 					})
 				})
 			}),
+			layout.Rigid(th.Divider),
+			layout.Rigid(func(gtx C) D {
+				if a.diag == nil {
+					return D{}
+				}
+				return p.settingRow(a, gtx, th.T(KDiagSkipGeo), th.T(KDiagSkipGeoHint), func(gtx C) D {
+					return th.Toggle(gtx, &a.diag.skipGeo, "")
+				})
+			}),
 		)
 	})
 }

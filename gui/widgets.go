@@ -328,15 +328,28 @@ type ChipStyle struct {
 	Solid bool
 	// Dot prefixes the label with a status dot.
 	Dot bool
+	// Icon prefixes the label with a vector glyph, drawn in the level colour.
+	//
+	// This is how pass/fail marks are drawn rather than a ✔/✘ in the label: the
+	// base typeface is gofont, which has no dingbats, and the CJK face that
+	// would cover them is loaded from the host system and may be absent. A
+	// vector icon renders identically everywhere. Icon and Dot are mutually
+	// exclusive; Icon wins.
+	Icon IconFunc
+	// Value is appended after Text in the primary text colour, so a chip can
+	// carry "label + reading" without the reading being mistaken for the label.
+	Value string
 }
 
 // Chip renders a status pill.
 func (t *Theme) Chip(gtx C, s ChipStyle) D {
 	fg := t.StatusColor(s.Level)
 	bg := WithAlpha(fg, 0.14)
+	labelCol := fg
 	if s.Solid {
 		bg = fg
 		fg = t.P.AccentFg
+		labelCol = fg
 	}
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx C) D {
@@ -349,18 +362,43 @@ func (t *Theme) Chip(gtx C, s ChipStyle) D {
 			}.Layout(gtx, func(gtx C) D {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx C) D {
-						if !s.Dot {
+						switch {
+						case s.Icon != nil:
+							return layout.Inset{Right: 4}.Layout(gtx, func(gtx C) D {
+								return s.Icon(gtx, gtx.Dp(9), fg)
+							})
+						case s.Dot:
+							return layout.Inset{Right: 5}.Layout(gtx, func(gtx C) D {
+								return Circle(gtx, gtx.Dp(6), fg)
+							})
+						}
+						return D{}
+					}),
+					layout.Rigid(OneLine(t.Text(SizeCaption, labelCol, s.Text)).Layout),
+					layout.Rigid(func(gtx C) D {
+						if s.Value == "" {
 							return D{}
 						}
-						return layout.Inset{Right: 5}.Layout(gtx, func(gtx C) D {
-							return Circle(gtx, gtx.Dp(6), fg)
+						return layout.Inset{Left: 4}.Layout(gtx, func(gtx C) D {
+							return OneLine(t.Text(SizeCaption, t.P.TextPri, s.Value)).Layout(gtx)
 						})
 					}),
-					layout.Rigid(OneLine(t.Text(SizeCaption, fg, s.Text)).Layout),
 				)
 			})
 		}),
 	)
+}
+
+// StatusIcon is the mark that goes on a pass/fail chip.
+func StatusIcon(l StatusLevel) IconFunc {
+	switch l {
+	case LevelOK:
+		return IconCheck
+	case LevelWarn, LevelFail:
+		return IconCross
+	default:
+		return IconDash
+	}
 }
 
 // StatusDot draws a coloured dot; when pulse is true it breathes.

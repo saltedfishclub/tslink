@@ -127,7 +127,13 @@ func Run(ctx context.Context, opt Options) *Report {
 			case err != nil:
 				rep.Tailscale = TailscaleReport{Status: StatusSkipped, Err: err.Error()}
 			default:
-				rep.Tailscale = TailscaleReport{Status: StatusSkipped}
+				// Defensive: a source that returns neither a report nor an
+				// error still failed to measure, and Err is what marks the
+				// difference between that and "no source was configured".
+				rep.Tailscale = TailscaleReport{
+					Status: StatusSkipped,
+					Err:    "netcheck returned no report",
+				}
 			}
 			if err != nil {
 				errText = err.Error()
@@ -262,11 +268,68 @@ func headline(r *Report) (string, Status) {
 		return "仅 HTTP 探测到多个出口 IP，代理或分流工具可能影响连接", StatusWarn
 	case r.PortMap.Status == StatusWarn && r.NAT.Type == NATPortRestrict:
 		return "路由器未提供端口映射，NAT 为端口限制型，打洞成功率一般", StatusWarn
-	case r.Status == StatusOK:
-		return "网络状况良好，具备直连条件", StatusOK
-	default:
-		return "诊断完成，存在若干需要注意的项目", r.Status
 	}
+
+	// No single finding is worth leading with, so what is left is whether the
+	// run itself worked.
+	//
+	// This is checked before the all-clear below, not after. Section statuses
+	// can all read OK while a section quietly failed to measure anything — a
+	// NAT whose filtering behaviour is unknown is the common one — and
+	// answering that with "具备直连条件" asserts exactly the property that was
+	// never determined.
+	if missing := indeterminate(r); len(missing) > 0 {
+		return "诊断完成；未能得出结论的项目：" + strings.Join(missing, "、"), StatusWarn
+	}
+	if r.Status == StatusOK {
+		return "网络状况良好，具备直连条件", StatusOK
+	}
+	return "诊断完成，各项检测均已得出结论", StatusOK
+}
+
+// indeterminate names the sections that could not produce an answer, as opposed
+// to producing an unwelcome one.
+//
+// That distinction is what the closing headline is for. "The router does not
+// speak UPnP" and "this NAT is port-restricted" are answers: the diagnostic
+// worked, and the user now knows something true about their network. Reporting
+// those as "存在若干需要注意的项目" in alarm colours said the run had gone wrong
+// when it had gone exactly right, and — because Report.Status is the worst of
+// every section — a single unremarkable finding was enough to trigger it.
+//
+// Only a section that failed to measure belongs here.
+func indeterminate(r *Report) []string {
+	var out []string
+	if r.Interfaces.Err != "" {
+		out = append(out, "本机地址")
+	}
+	if r.UDP.Status == StatusSkipped || len(r.UDP.Probes) == 0 {
+		out = append(out, "UDP 连通性")
+	}
+	// A NAT is undetermined when the classifier could not name it. Every other
+	// type, symmetric and UDP-blocked included, is a real measurement.
+	if r.NAT.Type == NATUnknown || r.NAT.Mapping == BehaviorUnknown || r.NAT.Filtering == BehaviorUnknown {
+		out = append(out, "NAT 类型")
+	}
+	// "Router answered and does not support it" is an answer; "no gateway to
+	// ask" is not.
+	if r.PortMap.Status == StatusSkipped || !r.PortMap.Gateway.IsValid() {
+		out = append(out, "端口映射")
+	}
+	if r.Overseas.Status == StatusSkipped || len(r.Overseas.Probes) == 0 {
+		out = append(out, "境外连通性")
+	}
+	if len(r.Egress.UniqueIPs) == 0 {
+		out = append(out, "出口 IP")
+	}
+	// No tailscale source at all is the caller opting out — the same kind of
+	// choice as SkipGeo, not a measurement that failed. Only a netcheck that
+	// was actually attempted and came back empty belongs here, and Err is what
+	// distinguishes the two.
+	if r.Tailscale.Status == StatusSkipped && r.Tailscale.Err != "" {
+		out = append(out, "Tailscale 内部状态")
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +350,10 @@ func (r *Report) Text() string {
 	w("=== tslink 网络诊断报告 ===\n")
 	w("时间: %s\n", r.StartedAt.Format(time.RFC3339))
 	w("耗时: %s\n", r.Duration.Round(time.Millisecond))
-	w("总评: [%s] %s\n\n", strings.ToUpper(r.Status.String()), r.Headline)
+	// The severity printed here is the headline's own, so the tag and the
+	// sentence beside it cannot contradict each other. Report.Status is the
+	// worst of every section and is still what each section header below shows.
+	w("总评: [%s] %s\n\n", strings.ToUpper(r.HeadlineStatus.String()), r.Headline)
 
 	// --- interfaces --------------------------------------------------------
 	w("--- 本机地址 [%s] ---\n", r.Interfaces.Status)
@@ -444,10 +510,7 @@ func (r *Report) Text() string {
 	if r.Tailscale.Available {
 		w("UDP: %v  IPv4: %v  IPv6: %v  ICMPv4: %v\n",
 			r.Tailscale.UDP, r.Tailscale.IPv4, r.Tailscale.IPv6, r.Tailscale.ICMPv4)
-		w("UPnP: %s  PMP: %s  PCP: %s\n",
-			triState(r.Tailscale.UPnP), triState(r.Tailscale.PMP), triState(r.Tailscale.PCP))
-		w("映射随目标变化: %s  门户劫持: %s\n",
-			triState(r.Tailscale.MappingVariesByDestIP), triState(r.Tailscale.CaptivePortal))
+		w("门户劫持: %s\n", triState(r.Tailscale.CaptivePortal))
 		if r.Tailscale.GlobalV4 != "" {
 			w("GlobalV4: %s\n", r.Tailscale.GlobalV4)
 		}

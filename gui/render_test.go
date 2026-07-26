@@ -251,7 +251,6 @@ func TestDiagPageWithReport(t *testing.T) {
 		Tailscale: netdiag.TailscaleReport{
 			Available: true, UDP: true, IPv4: true, Status: netdiag.StatusOK,
 			Summary: "首选 DERP tok", PreferredDERP: "tok",
-			MappingVariesByDestIP: &yes,
 			DERP: []netdiag.DERPLatency{
 				{RegionID: 1, RegionCode: "tok", Name: "Tokyo", Latency: 40 * time.Millisecond, Preferred: true},
 				{RegionID: 2, RegionCode: "sin", Name: "Singapore", Latency: 90 * time.Millisecond},

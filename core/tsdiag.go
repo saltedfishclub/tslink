@@ -21,8 +21,12 @@ import (
 //
 // The diagnostics package probes the network from scratch; this asks tailscale
 // what it already believes. The two disagreeing is itself informative — for
-// DERP latency and tailscale's own UPnP/PMP/PCP probe, tailscale's answer is
-// the one that governs how the tunnel will actually behave.
+// DERP latency, tailscale's answer is the one that governs how the tunnel will
+// actually behave.
+//
+// netcheck's UPnP/PMP/PCP fields are not carried over: they are only populated
+// when tailscale's port mapper has independently run, so reading them here
+// yielded a permanent "unknown". netdiag probes those protocols directly.
 type TsDiagSource struct {
 	srv    *tsnet.Server
 	logger *slog.Logger
@@ -130,11 +134,7 @@ func convertNetcheck(raw *netcheck.Report, dm *tailcfg.DERPMap) *netdiag.Tailsca
 		ICMPv4:    raw.ICMPv4,
 		OSHasIPv6: raw.OSHasIPv6,
 
-		MappingVariesByDestIP: optBool(raw.MappingVariesByDestIP.Get()),
-		UPnP:                  optBool(raw.UPnP.Get()),
-		PMP:                   optBool(raw.PMP.Get()),
-		PCP:                   optBool(raw.PCP.Get()),
-		CaptivePortal:         optBool(raw.CaptivePortal.Get()),
+		CaptivePortal: optBool(raw.CaptivePortal.Get()),
 	}
 	if raw.GlobalV4.IsValid() {
 		out.GlobalV4 = raw.GlobalV4.String()
@@ -196,14 +196,11 @@ func netcheckVerdict(r *netdiag.TailscaleReport) (netdiag.Status, string) {
 	}
 
 	best := r.DERP[0]
-	summary := fmt.Sprintf("首选 DERP %s，延迟 %dms",
+	// Nothing here re-states the NAT verdict: netdiag.ClassifyNAT measures
+	// mapping behaviour properly and owns that sentence.
+	return netdiag.StatusOK, fmt.Sprintf("首选 DERP %s，延迟 %dms",
 		nonEmpty(r.PreferredDERP, best.RegionCode),
 		best.Latency.Milliseconds())
-	if r.MappingVariesByDestIP != nil && *r.MappingVariesByDestIP {
-		return netdiag.StatusWarn,
-			summary + "；NAT 映射随目标变化（对称型），直连打洞成功率低"
-	}
-	return netdiag.StatusOK, summary
 }
 
 func nonEmpty(v, fallback string) string {
