@@ -205,9 +205,7 @@ func (p *logsPage) startUpload(a *App, text string) {
 		} else {
 			a.notify(a.th.T(KLogsUploaded)+" "+res.URL, LevelOK)
 		}
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 	}()
 }
 

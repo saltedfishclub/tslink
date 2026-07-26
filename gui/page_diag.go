@@ -106,9 +106,7 @@ func (p *diagPage) run() {
 				}
 				p.progress[pr.Key] = pr
 				p.mu.Unlock()
-				if a.win != nil {
-					a.win.Invalidate()
-				}
+				a.invalidate()
 			},
 		})
 		p.mu.Lock()
@@ -117,9 +115,7 @@ func (p *diagPage) run() {
 		p.lastRun = time.Now()
 		p.cancel = nil
 		p.mu.Unlock()
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 	}()
 }
 

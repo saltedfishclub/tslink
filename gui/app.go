@@ -63,7 +63,10 @@ type App struct {
 	th     *Theme
 	fonts  *FontSet
 
-	win *app.Window
+	// win is the window currently on screen. It is replaced when the splash
+	// hands off to the shell, so background goroutines load it through
+	// [App.invalidate] rather than capturing a single window.
+	win atomic.Pointer[app.Window]
 
 	nav     []navEntry
 	current pageID
@@ -77,14 +80,6 @@ type App struct {
 	splash *splashView
 
 	themeBtn widget.Clickable
-
-	// grown records that the window has already been resized from its compact
-	// splash dimensions to the full shell. The splash sizes the window to just
-	// its progress bar and checklist, so the transition to the shell has to grow
-	// it — exactly once, or a user who resized the window would have it snapped
-	// back every time the service restarted. Atomic because the resize runs on
-	// the watch goroutine, not the UI one.
-	grown atomic.Bool
 
 	toastMsg   string
 	toastLevel StatusLevel
@@ -138,65 +133,97 @@ func New(opt Options) *App {
 	return a
 }
 
-// Run opens the window and drives the event loop. It returns when the window
-// closes.
+// Run shows the GUI and returns when it closes.
+//
+// It opens two windows in sequence: a compact splash sized to its progress
+// checklist during boot, then a full-size shell once the service is ready.
+// Each window is created at its final size. Growing a window at runtime — which
+// is what an in-place splash-to-shell transition would need — is unreliable
+// across compositors (Wayland in particular refuses client-driven resizes on
+// some of them), so opening a correctly sized window is the dependable path.
 func (a *App) Run(ctx context.Context) error {
-	w := new(app.Window)
-	// Opens at splash size; grown to the shell dimensions below once the
-	// service is ready.
-	w.Option(
-		app.Title("tslink"),
-		app.Size(splashWindowW, splashWindowH),
-		app.MinSize(splashMinW, splashMinH),
-	)
-	a.win = w
-
-	go a.watch(ctx, w)
+	go a.watch(ctx)
 	go a.upgradeFonts()
+
+	// The splash runs until the service is ready, then closes itself and asks
+	// the caller to open the shell. Any other exit — the user closing the
+	// window, or ctx being cancelled — quits.
+	proceed, err := a.runWindow(ctx, false)
+	if err != nil || !proceed || ctx.Err() != nil {
+		return err
+	}
+	_, err = a.runWindow(ctx, true)
+	return err
+}
+
+// runWindow creates one window and drives its event loop: the compact splash
+// (shell=false) or the full-size shell (shell=true).
+//
+// It reports proceed=true only for the splash's ready handoff — the service
+// came up, so the splash closed itself and the caller should open the shell.
+// A window closed by the user or by ctx cancellation returns proceed=false,
+// which quits the app.
+func (a *App) runWindow(ctx context.Context, shell bool) (proceed bool, err error) {
+	w := new(app.Window)
+	if shell {
+		w.Option(
+			app.Title("tslink"),
+			app.Size(shellWindowW, shellWindowH),
+			app.MinSize(shellMinW, shellMinH),
+		)
+	} else {
+		w.Option(
+			app.Title("tslink"),
+			app.Size(splashWindowW, splashWindowH),
+			app.MinSize(splashMinW, splashMinH),
+		)
+	}
+	a.win.Store(w)
+
 	// Ctrl+C at the terminal cancels ctx. Without this the supervisor tears
-	// down but the window survives, dropping the user back to the splash — the
-	// GUI is the process, so cancelling it has to close the window too.
+	// down but the window survives — the GUI is the process, so cancelling it
+	// has to close the window too. Scoped to this window and stopped when the
+	// loop returns, so it never reaches across the handoff to the next one.
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
-		<-ctx.Done()
-		w.Perform(system.ActionClose)
+		select {
+		case <-ctx.Done():
+			w.Perform(system.ActionClose)
+		case <-stop:
+		}
 	}()
 
+	// handoff records that we closed the splash because the service came up, so
+	// the resulting DestroyEvent means "open the shell" rather than "quit".
+	handoff := false
 	var ops op.Ops
 	for {
 		switch e := w.Event().(type) {
 		case app.DestroyEvent:
-			return e.Err
+			return handoff, e.Err
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
 			a.applyFontUpgrade()
-			a.layout(gtx)
+			// The splash window always draws the splash, even on the frame
+			// where the service first reports ready: otherwise the shell would
+			// flash cramped in the compact window for one frame before handoff.
+			a.layout(gtx, !shell)
 			e.Frame(gtx.Ops)
-			// After the frame, so the resize is not applied midway through
-			// laying one out against the old constraints. Once grown this is a
-			// single atomic load.
-			if !a.grown.Load() && a.state().Ready() {
-				a.grow(w)
+			if !shell && a.state().Ready() {
+				handoff = true
+				w.Perform(system.ActionClose)
 			}
 		}
 	}
 }
 
-// grow resizes the window from its compact splash dimensions to the full shell,
-// once, when the service comes up.
-//
-// It must run on the goroutine that drives the event loop. On Linux the driver
-// executes Window.Option's work inline on the calling goroutine rather than
-// handing it to a UI thread, so calling this from anywhere else would mutate
-// driver state concurrently with event dispatch.
-func (a *App) grow(w *app.Window) {
-	if a.grown.Swap(true) {
-		return
+// invalidate schedules a repaint of whichever window is currently shown. It is
+// a no-op before the first window exists and is safe from any goroutine.
+func (a *App) invalidate() {
+	if w := a.win.Load(); w != nil {
+		w.Invalidate()
 	}
-	w.Option(
-		app.Size(shellWindowW, shellWindowH),
-		app.MinSize(shellMinW, shellMinH),
-	)
-	w.Invalidate()
 }
 
 // upgradeFonts parses the system CJK font off the UI goroutine. The splash
@@ -217,9 +244,7 @@ func (a *App) upgradeFonts() {
 	}
 	select {
 	case a.fontUpgrade <- faces:
-		if a.win != nil {
-			a.win.Invalidate()
-		}
+		a.invalidate()
 	default:
 	}
 }
@@ -237,7 +262,7 @@ func (a *App) applyFontUpgrade() {
 
 // watch coalesces change notifications from every data source into window
 // invalidations, capped so a burst of log lines cannot drive the render loop.
-func (a *App) watch(ctx context.Context, w *app.Window) {
+func (a *App) watch(ctx context.Context) {
 	var chans []<-chan struct{}
 	var cancels []func()
 	defer func() {
@@ -299,7 +324,7 @@ func (a *App) watch(ctx context.Context, w *app.Window) {
 		case <-throttle.C:
 			if dirty {
 				dirty = false
-				w.Invalidate()
+				a.invalidate()
 			}
 		}
 	}
@@ -346,16 +371,17 @@ func (a *App) notify(msg string, level StatusLevel) {
 	a.toastMsg = msg
 	a.toastLevel = level
 	a.toastUntil = time.Now().Add(3200 * time.Millisecond)
-	if a.win != nil {
-		a.win.Invalidate()
-	}
+	a.invalidate()
 }
 
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
 
-func (a *App) layout(gtx C) D {
+// layout draws one frame. forceSplash keeps the splash on screen even once the
+// service is ready, which the compact splash window uses so the shell never
+// flashes cramped in it before the handoff to the full-size window.
+func (a *App) layout(gtx C, forceSplash bool) D {
 	th := a.th
 	paint.Fill(gtx.Ops, th.P.Bg)
 
@@ -378,7 +404,7 @@ func (a *App) layout(gtx C) D {
 	return layout.Stack{}.Layout(gtx,
 		layout.Stacked(func(gtx C) D {
 			gtx.Constraints.Min = gtx.Constraints.Max
-			if !st.Ready() {
+			if forceSplash || !st.Ready() {
 				// The splash owns the whole window until the service is up.
 				return a.splash.Layout(a, gtx, st)
 			}

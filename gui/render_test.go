@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"gioui.org/app"
 	"gioui.org/io/input"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -321,25 +320,17 @@ func TestTrFallsBackToEnglish(t *testing.T) {
 	}
 }
 
-// TestGrowOnce guards the window-resize latch. Growing more than once would
-// snap a window the user had deliberately resized back to the shell default
-// every time the service restarted.
-func TestGrowOnce(t *testing.T) {
+// TestLayoutForceSplash exercises the top-level frame that runWindow drives.
+// The splash window passes forceSplash=true; the shell window passes false.
+// With no supervisor the state is not ready, so both must fall to the splash
+// branch and lay out without panicking — the guard for the compile-time change
+// to layout's signature and the forceSplash branch it added.
+func TestLayoutForceSplash(t *testing.T) {
 	a := testApp(t)
-	// A Window with no driver queues options instead of touching a display,
-	// which is what makes this testable without one.
-	w := new(app.Window)
-
-	if a.grown.Load() {
-		t.Fatal("a fresh App must not be marked grown")
+	for _, forceSplash := range []bool{true, false} {
+		gtx, _ := newTestContext(image.Pt(int(shellWindowW), int(shellWindowH)))
+		a.layout(gtx, forceSplash)
 	}
-	a.grow(w)
-	if !a.grown.Load() {
-		t.Fatal("grow() must latch")
-	}
-	// Must be a no-op now.
-	a.grow(w)
-	a.grow(w)
 }
 
 // TestStatTilesUniformHeight guards the overview's top row. The tiles sit in a
