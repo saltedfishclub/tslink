@@ -9,6 +9,34 @@ on:
     types: [published]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.26.3'
+        cache: true
+
+    # The gui package imports gioui.org/app, which needs the X11/Wayland/EGL
+    # headers even to compile. Without them `go vet ./...` cannot typecheck it.
+    - name: Install Gio build dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-dev \
+          libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev \
+          libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev \
+          libvulkan-dev
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Test
+      run: go test -race ./...
+
   build:
     runs-on: ubuntu-latest
     env:
@@ -71,6 +99,75 @@ jobs:
         name: tslink-${{ steps.version.outputs.version }}-${{ matrix.goos }}_${{ matrix.goarch }}
         path: release/
 
+  # The GUI cannot be cross-compiled the way the headless binary is: Gio needs
+  # CGO for X11/EGL on Linux and Cocoa on macOS, so each target is built on its
+  # own runner. Windows is the exception and builds without CGO.
+  build-gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest,    goos: linux,   goarch: amd64, cgo: 1}
+          - {os: ubuntu-24.04-arm, goos: linux,   goarch: arm64, cgo: 1}
+          - {os: windows-latest,   goos: windows, goarch: amd64, cgo: 0}
+          - {os: macos-latest,     goos: darwin,  goarch: arm64, cgo: 1}
+          - {os: macos-13,         goos: darwin,  goarch: amd64, cgo: 1}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.26.3'
+        cache: true
+
+    - name: Install Gio build dependencies
+      if: matrix.goos == 'linux'
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-dev \
+          libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev \
+          libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev \
+          libvulkan-dev
+
+    - name: Determine version
+      id: version
+      shell: bash
+      run: |
+        if [ "${{ github.event_name }}" = "release" ]; then
+          echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        else
+          echo "version=dev$(date +'%y%m%d')" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build GUI
+      shell: bash
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: ${{ matrix.cgo }}
+      run: |
+        BINARY_NAME="tslink-gui"
+        LDFLAGS="-s -w -X main.Version=${{ steps.version.outputs.version }}"
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+          # -H=windowsgui suppresses the console window that would otherwise
+          # open behind the app.
+          LDFLAGS="$LDFLAGS -H=windowsgui"
+        fi
+        go build -v -trimpath -buildvcs=false \
+          -o "release/${BINARY_NAME}" -ldflags="$LDFLAGS" ./cmd/tslink-gui
+
+    # Deliberately not UPX-compressed: packed GUI binaries trip antivirus
+    # heuristics on Windows and break code signing on macOS.
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v5
+      with:
+        name: tslink-gui-${{ steps.version.outputs.version }}-${{ matrix.goos }}_${{ matrix.goarch }}
+        path: release/
+
   container:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -114,7 +211,7 @@ jobs:
 
   release:
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, build-gui]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -126,13 +223,16 @@ jobs:
         for dir in */; do
           dir=${dir%/}
           plat=$(echo "$dir" | grep -oE '(linux|windows|darwin)_(amd64|arm64)$')
-          version=$(echo "$dir" | sed "s/^tslink-//; s/-${plat}$//")
+          [ -n "$plat" ] || continue
+          # Artifact dirs are tslink-<version>-<plat> or tslink-gui-<version>-<plat>.
+          name=$(echo "$dir" | sed -E "s/-[^-]+-${plat}$//")
+          version=$(echo "$dir" | sed -E "s/^${name}-//; s/-${plat}$//")
           platform=$(echo "$plat" | tr '_' '-')
-          for bin in "$dir"/tslink "$dir"/tslink.exe; do
+          for bin in "$dir/$name" "$dir/$name.exe"; do
             if [ -f "$bin" ]; then
               case "$bin" in
-                *.exe) mv "$bin" "$dir/tslink-${version}-${platform}.exe" ;;
-                *)     mv "$bin" "$dir/tslink-${version}-${platform}" ;;
+                *.exe) mv "$bin" "$dir/${name}-${version}-${platform}.exe" ;;
+                *)     mv "$bin" "$dir/${name}-${version}-${platform}" ;;
               esac
             fi
           done

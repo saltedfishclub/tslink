@@ -75,7 +75,9 @@ func LanDiscoverService(ctx context.Context, entryList []LanEntry, logger *slog.
 	}
 }
 
-func RunLanDiscoverService(ctx context.Context, rules map[string][]ConnectRule, logger *slog.Logger) {
+// LanEntriesFromRules collects the advertisements implied by the connect
+// rules. The GUI uses it to tell our own broadcasts apart from other servers'.
+func LanEntriesFromRules(rules map[string][]ConnectRule) []LanEntry {
 	var lanEntries []LanEntry
 	for tag, rs := range rules {
 		for _, rule := range rs {
@@ -89,6 +91,9 @@ func RunLanDiscoverService(ctx context.Context, rules map[string][]ConnectRule, 
 			})
 		}
 	}
+	return lanEntries
+}
 
-	go LanDiscoverService(ctx, lanEntries, logger)
+func RunLanDiscoverService(ctx context.Context, rules map[string][]ConnectRule, logger *slog.Logger) {
+	go LanDiscoverService(ctx, LanEntriesFromRules(rules), logger)
 }

@@ -159,3 +159,84 @@ docker run -d \
   ghcr.io/saltedfishclub/tslink:latest \
   -c /etc/tslink/config.toml
 ```
+
+## 图形界面 `tslink-gui`
+
+`tslink-gui` 是可选的桌面前端，使用 [Gio](https://gioui.org) 直接绘制界面——不含 WebView、不打包浏览器，Linux / macOS / Windows 各是一个原生可执行文件（约 30 MB）。
+
+它在自身进程内运行与无界面版**完全相同**的转发服务，因此配置文件、规则语义和行为都一致：
+
+```bash
+tslink-gui -c config.toml
+```
+
+### 命令行参数
+
+除下列参数外，`-c`、`-config-url`、`-level`、`-json-format`、`-diagnose` 与无界面版含义相同。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-light` | `false` | 以浅色主题启动（默认深色） |
+| `-ipinfo-token` | `$IPINFO_TOKEN` | ipinfo.io 的 API Token，可选，用于提高归属地查询的速率限制 |
+| `-pprof` | 空 | 在指定地址暴露 `net/http/pprof`，如 `127.0.0.1:6060`。仅允许回环地址 |
+
+无论 `-level` 设为什么，界面内的日志缓冲区**始终按 debug 级别**记录最近 20000 条，所以出问题后不必重启加 `-level debug` 再复现一次。
+
+### 界面说明
+
+| 页面 | 内容 |
+|------|------|
+| **概览** | 在线节点数、局域网服务器数、规则数、运行时长，以及最近一次诊断的结论 |
+| **节点** | 每个 Tailscale 节点的在线状态、链路类型、实时延迟、抖动与丢包；顶部为多节点**延迟图谱**（最近 20 分钟，鼠标悬停可查看某一时刻的取值，点击图例可隐藏某个节点） |
+| **局域网** | 监听 `224.0.2.60:4445` / `[ff75:230::60]:4445` 的 Minecraft LAN 广播。由 tslink 自己广播的条目会标记为「本机广播」——**配置了规则却听不到自己的广播，说明隧道或组播链路有问题** |
+| **网络诊断** | 见下 |
+| **日志** | 按级别、来源、关键字检索，复制 / 保存 / 上传 |
+| **设置** | 主题、语言、版本与配置来源 |
+
+启动过程中，界面显示分步进度的加载动画；实时日志以**半透明浮层**固定在底部，因此启动卡住时直接截图就包含了排查所需的信息。服务就绪后，浮层可通过标题栏按钮随时唤出。
+
+### 网络诊断
+
+点击「开始诊断」后并行执行以下检查，整体不超过 45 秒：
+
+| 检查项 | 说明 |
+|--------|------|
+| **NAT 类型** | 依 RFC 5780 做映射行为与过滤行为探测，并映射到常见的完全锥形 / 地址限制 / 端口限制 / 对称型命名。对称型 NAT 会导致打洞失败、连接回退到 DERP 中继 |
+| **UDP 连通性** | 对国内与境外 STUN 服务器分别探测 IPv4/IPv6，并识别疑似被封锁的目标端口 |
+| **本机出口地址** | 列出所有接口上的 IPv4 与 IPv6 地址，标注默认出口以及 CGNAT / Tailscale / 私有 / 公网等类型 |
+| **端口映射** | 自行实现的 UPnP IGD（SSDP + SOAP）、NAT-PMP（RFC 6886）与 PCP（RFC 6887）探测，能拿到路由器型号与外部地址 |
+| **境外连通性** | 以 `cp.cloudflare.com/generate_204` 为主，辅以 gstatic / Google，并用国内基准（小米 / 百度）区分「完全没网」与「只是出不了境」 |
+| **出口 IP 与归属地** | 通过 STUN（裸 UDP，绕过 HTTP 代理）、强制 IPv4、强制 IPv6、以及走系统代理四种方式分别探测，再用 ipinfo.io（失败时回退 ip-api.com / ip.sb）查询归属地 |
+| **Tailscale 内部状态** | 直接调用 tailscale 自己的 netcheck，取得 DERP 各区域延迟、首选中继、门户劫持判定，以及它自己看到的 UPnP/PMP/PCP 结果 |
+
+STUN 服务器**同时包含国内与境外**两组（小米、B 站、腾讯、芒果 TV、Cloudflare 任播 / Google、Cloudflare、Nextcloud、BlackBerry、SipNet、StunProtocol）。这不只是为了容错：当本机启用了代理或分流工具时，不同探测路径会得到**不同的公网 IP**，诊断页会把这种分歧单独标出来——这通常正是「为什么对端连不上我」的答案。
+
+> 归属地查询会把你的公网 IP 发送给第三方服务。不希望如此时，勾选「不查询归属地」即可跳过。
+>
+> 出口 IP 的「不一致」判定按 IPv4 / IPv6 分别计算，双栈主机同时拥有一个 v4 和一个 v6 出口属于正常情况，不会被误报。
+
+### 导出与分享日志
+
+日志页提供三种导出方式，都会附带一段环境信息头（版本、系统、配置来源、运行阶段、节点数），以及最近一次的完整诊断报告：
+
+- **复制到剪贴板**
+- **保存到文件**：写入用户主目录，文件名形如 `tslink-log-20260726-084500.txt`
+- **上传并分享**：依次尝试 0x0.st、paste.rs、dpaste.org、termbin.com，成功后返回链接并自动复制
+
+导出默认开启「隐去密钥」，会移除 `auth_key` 等凭据以及形如 `tskey-...` 的字符串。**上传是公开的**——任何拿到链接的人都能看到内容，其中包含你的公网 IP 与内网地址，请自行判断。
+
+### 从源码构建
+
+Windows 无需额外依赖。macOS 需要 Xcode Command Line Tools。Linux 需要 X11 / Wayland / EGL 的开发头文件：
+
+```bash
+sudo apt install -y pkg-config libwayland-dev libx11-dev libx11-xcb-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev \
+  libffi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
+
+go build -o tslink-gui ./cmd/tslink-gui
+```
+
+界面语言默认跟随中文字体的可用性：找不到任何中文字体时自动切换为英文，以免显示成方块（也可在设置里手动切换）。
+
+由于 Gio 依赖 CGO，GUI 无法像无界面版那样交叉编译，需要在目标平台上分别构建。
