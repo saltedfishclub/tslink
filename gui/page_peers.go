@@ -12,9 +12,12 @@ import (
 	"tslink/core"
 )
 
-// chartWindow is how much latency history the graph shows. It matches the
-// monitor's default 120-sample ring at a 10s ping interval.
-const chartWindow = 20 * time.Minute
+// chartWindow is the most latency history the graph shows. The monitor retains
+// 20 minutes, but a spike that old tells you nothing about the session you are
+// in right now, and stretching the axis over it flattens everything recent into
+// noise. The axis scales to whatever data exists within this bound, so the plot
+// is full from the second sample rather than after 20 minutes of uptime.
+const chartWindow = 3 * time.Minute
 
 // maxChartSeries caps how many peers are plotted at once. Beyond about eight
 // lines a latency graph stops being readable, so linked peers win and the rest
@@ -75,8 +78,10 @@ func (p *peersPage) Layout(a *App, gtx C, st core.State) D {
 		a.notify(th.T(KRefresh), LevelInfo)
 	}
 
-	linked, other := splitPeers(snap.Peers)
-	series := p.buildSeries(th, snap.Peers)
+	// Only nodes a config rule points at. The netmap contains every machine on
+	// the tailnet, most of which the user has no rule for and no interest in.
+	linked, _ := splitPeers(snap.Peers)
+	series := p.buildSeries(th, linked)
 
 	// Legend clicks toggle series visibility.
 	for i := range series {
@@ -87,7 +92,7 @@ func (p *peersPage) Layout(a *App, gtx C, st core.State) D {
 		series[i].s.Hidden = p.hidden[id]
 	}
 
-	items := make([]layout.Widget, 0, len(snap.Peers)+4)
+	items := make([]layout.Widget, 0, len(linked)+4)
 	items = append(items, func(gtx C) D { return p.chartCard(a, gtx, series) })
 
 	if len(linked) > 0 {
@@ -97,22 +102,21 @@ func (p *peersPage) Layout(a *App, gtx C, st core.State) D {
 		for _, pr := range linked {
 			items = append(items, func(gtx C) D { return p.peerCard(a, gtx, st, pr) })
 		}
-	}
-	if len(other) > 0 {
+	} else {
 		items = append(items, func(gtx C) D {
-			return a.sectionTitle(gtx, th.T(KPeersOther), "", nil)
-		})
-		for _, pr := range other {
-			items = append(items, func(gtx C) D { return p.peerCard(a, gtx, st, pr) })
-		}
-	}
-	if len(snap.Peers) == 0 {
-		items = append(items, func(gtx C) D {
+			// Link resolution is periodic and needs DNS, so on a fresh boot
+			// every peer is briefly unlinked. Saying "no peers" there would be
+			// wrong; the netmap may be full of machines we simply have no rule
+			// for yet.
 			hint := snap.Err
 			if hint == "" {
 				hint = snap.BackendState
 			}
-			return th.EmptyState(gtx, IconNodes, th.T(KPeersEmpty), hint)
+			title := th.T(KPeersEmpty)
+			if len(snap.Peers) > 0 {
+				title = th.T(KPeersResolving)
+			}
+			return th.EmptyState(gtx, IconNodes, title, hint)
 		})
 	}
 
@@ -156,13 +160,23 @@ func (p *peersPage) buildSeries(th *Theme, peers []core.PeerInfo) []namedSeries 
 		if len(pr.Samples) == 0 {
 			continue
 		}
+		// Drop samples outside the window by age rather than by count: the
+		// monitor's ring is not evenly spaced, because a manual refresh injects
+		// an off-cycle sweep.
+		cutoff := time.Now().Add(-chartWindow)
 		pts := make([]ChartPoint, 0, len(pr.Samples))
 		for _, s := range pr.Samples {
+			if s.At.Before(cutoff) {
+				continue
+			}
 			pts = append(pts, ChartPoint{
 				At:    s.At,
 				Value: float64(s.Latency) / float64(time.Millisecond),
 				OK:    s.OK,
 			})
+		}
+		if len(pts) == 0 {
+			continue
 		}
 		out = append(out, namedSeries{
 			id: pr.ID,
@@ -179,9 +193,26 @@ func (p *peersPage) buildSeries(th *Theme, peers []core.PeerInfo) []namedSeries 
 
 func (p *peersPage) chartCard(a *App, gtx C, series []namedSeries) D {
 	th := a.th
+	plot := make([]ChartSeries, len(series))
+	for i, s := range series {
+		plot[i] = s.s
+	}
+	style := ChartStyle{
+		Height:     200,
+		MaxWindow:  chartWindow,
+		Now:        time.Now(),
+		Unit:       "ms",
+		FillSingle: true,
+	}
+
 	card := th.Card()
 	card.Title = th.T(KGraphTitle)
-	card.Subtitle = th.T(KGraphWindow)
+	// The axis follows the data, so the subtitle has to as well — a fixed
+	// "last 20 minutes" was a lie for the first 20 minutes of every run.
+	if len(plot) > 0 {
+		tMin, tMax := domain(plot, style)
+		card.Subtitle = th.T(KGraphWindow) + " " + FormatDuration(tMax.Sub(tMin))
+	}
 	card.Trailing = func(gtx C) D {
 		return th.IconButton(gtx, &p.refresh, IconRefresh, LevelNeutral)
 	}
@@ -189,19 +220,9 @@ func (p *peersPage) chartCard(a *App, gtx C, series []namedSeries) D {
 		if len(series) == 0 {
 			return th.EmptyState(gtx, IconPulse, th.T(KGraphEmpty), "")
 		}
-		plot := make([]ChartSeries, len(series))
-		for i, s := range series {
-			plot[i] = s.s
-		}
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx C) D {
-				return p.chart.Layout(th, gtx, ChartStyle{
-					Height:     200,
-					Window:     chartWindow,
-					Now:        time.Now(),
-					Unit:       "ms",
-					FillSingle: true,
-				}, plot)
+				return p.chart.Layout(th, gtx, style, plot)
 			}),
 			VGap(SpaceMD),
 			layout.Rigid(func(gtx C) D {
@@ -213,23 +234,23 @@ func (p *peersPage) chartCard(a *App, gtx C, series []namedSeries) D {
 
 func (p *peersPage) legendRow(a *App, gtx C, series []namedSeries) D {
 	th := a.th
-	children := make([]layout.FlexChild, 0, len(series))
+	entries := make([]LegendEntry, 0, len(series))
 	for _, s := range series {
-		id := s.id
-		entry := LegendEntry{
+		entries = append(entries, LegendEntry{
 			Name:   s.s.Name,
 			Color:  s.s.Color,
-			Hidden: p.hidden[id],
+			Hidden: p.hidden[s.id],
 			Value:  lastValue(s.s.Points),
-		}
-		click := p.legendClick(id)
-		children = append(children, layout.Rigid(func(gtx C) D {
-			return click.Layout(gtx, func(gtx C) D {
-				return th.LegendChip(gtx, entry, click.Hovered())
-			})
-		}))
+		})
 	}
-	return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEnd}.Layout(gtx, children...)
+	return th.Legend(gtx, entries, func(i int) layout.Widget {
+		click := p.legendClick(series[i].id)
+		return func(gtx C) D {
+			return click.Layout(gtx, func(gtx C) D {
+				return th.LegendChip(gtx, entries[i], click.Hovered())
+			})
+		}
+	})
 }
 
 func lastValue(points []ChartPoint) string {

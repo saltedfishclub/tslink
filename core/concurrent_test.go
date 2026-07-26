@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"log/slog"
-	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -149,72 +148,6 @@ func TestLogBufferRedactsOnExport(t *testing.T) {
 	raw := buf.ExportText(ExportOptions{Query: LogQuery{MinLevel: slog.LevelDebug}, NoRedact: true})
 	if indexOf(raw, "kSomeRealLookingKey123") < 0 {
 		t.Error("NoRedact should preserve the original text")
-	}
-}
-
-func TestLanScannerConcurrentAccess(t *testing.T) {
-	s := NewLanScanner(slog.New(slog.DiscardHandler))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	s.Start(ctx)
-
-	var wg sync.WaitGroup
-
-	// Feed announcements the way the read loops do.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; ctx.Err() == nil; i++ {
-			src := netip.AddrPortFrom(netip.MustParseAddr("192.168.1.50"), uint16(40000+i%3))
-			s.handle(src, "[MOTD]§aTest §bServer[/MOTD][AD]25565[/AD]")
-			s.handle(src, "malformed packet")
-		}
-	}()
-
-	// Read like the GUI does.
-	for i := 0; i < 3; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for ctx.Err() == nil {
-				for _, srv := range s.Servers() {
-					_ = srv.Motd
-					_ = srv.Addr
-				}
-				_ = s.Err()
-			}
-		}()
-	}
-
-	// Reconfigure while it runs.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for ctx.Err() == nil {
-			s.SetSelfEntries([]LanEntry{{Motd: "Test Server", Port: 25565}})
-			time.Sleep(time.Millisecond)
-			s.SetSelfEntries(nil)
-		}
-	}()
-
-	wg.Wait()
-
-	servers := s.Servers()
-	if len(servers) == 0 {
-		t.Fatal("expected the synthetic announcements to be recorded")
-	}
-	for _, srv := range servers {
-		if srv.Port != 25565 {
-			t.Errorf("unexpected port %d", srv.Port)
-		}
-		// Colour codes must be stripped.
-		if indexOf(srv.Motd, "§") >= 0 {
-			t.Errorf("colour codes survived: %q", srv.Motd)
-		}
-		if srv.Motd != "Test Server" {
-			t.Errorf("motd = %q, want %q", srv.Motd, "Test Server")
-		}
 	}
 }
 

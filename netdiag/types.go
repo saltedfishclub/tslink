@@ -130,6 +130,11 @@ type STUNResult struct {
 
 // UDPProbe is a plain "can I send and receive UDP here" datapoint.
 type UDPProbe struct {
+	// Host is the configured "hostname:port", kept alongside the resolved
+	// Target so the UI can name the server rather than an anonymous address.
+	Host string
+	// Target is the address actually probed, "ip:port". A server reachable over
+	// both families yields one probe per family, and only this tells them apart.
 	Target string
 	Name   string
 	Region Region
@@ -317,6 +322,15 @@ type EgressReport struct {
 	// intercepting part of the traffic. Having both an IPv4 and an IPv6 egress
 	// is ordinary dual stack and does not set this.
 	Divergent bool
+	// DivergentSTUN narrows Divergent to the case that actually breaks NAT
+	// traversal: STUN itself — plain UDP, the same path Tailscale punches
+	// through — saw more than one address in a family. That means the UDP
+	// egress genuinely varies per flow.
+	//
+	// Divergence seen only by the HTTP probes is a weaker signal. An HTTP proxy
+	// or split-tunnel rule can rewrite web traffic while leaving UDP alone, so
+	// it warrants a warning, not a verdict.
+	DivergentSTUN bool
 	// Countries is the set of distinct countries seen, sorted.
 	Countries []string
 	Status    Status
@@ -386,6 +400,11 @@ type Report struct {
 
 	// Headline is the single most important sentence about this report.
 	Headline string
+	// HeadlineStatus is the severity of Headline specifically, which is not
+	// always Status. Status is the worst of every section, so a report with an
+	// unrelated failure elsewhere would otherwise paint a merely-cautionary
+	// headline in alarm red and overstate what was actually found.
+	HeadlineStatus Status
 	// Status is the worst status across all sections.
 	Status Status
 }

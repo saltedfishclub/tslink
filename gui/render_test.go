@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"gioui.org/app"
 	"gioui.org/io/input"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -95,7 +96,6 @@ func readyState(t *testing.T) core.State {
 		ReadyAt:   time.Now().Add(-time.Hour),
 		Config:    cfg,
 		Peers:     core.NewPeerMonitor(nil, cfg.Connect, logger, core.PeerMonitorOptions{}),
-		Lan:       core.NewLanScanner(logger),
 	}
 }
 
@@ -105,7 +105,7 @@ func TestPagesLayout(t *testing.T) {
 		{X: 880, Y: 560},  // the declared minimum window
 		{X: 640, Y: 400},  // below minimum: compact rail, everything must still fit
 	}
-	pages := []pageID{pageOverview, pagePeers, pageLan, pageDiag, pageLogs, pageSettings}
+	pages := []pageID{pageOverview, pagePeers, pageDiag, pageLogs, pageSettings}
 
 	for _, size := range sizes {
 		for _, page := range pages {
@@ -138,11 +138,30 @@ func TestSplashLayout(t *testing.T) {
 			}
 			gtx, _ := newTestContext(size)
 			a.splash.Layout(a, gtx, st)
-			// The overlay is forced visible during the splash; it must lay out
-			// on top without depending on the splash having run.
-			a.overlay.Layout(a, gtx, true)
 		}
 	}
+}
+
+// TestSplashStuck covers the >20s branch, which swaps the footer hint and
+// promotes the export button.
+func TestSplashStuck(t *testing.T) {
+	a := testApp(t)
+	steps := splashTestSteps()
+	for i := range steps {
+		if steps[i].State == core.StepRunning {
+			steps[i].Started = time.Now().Add(-45 * time.Second)
+		}
+	}
+	st := core.State{
+		Phase:     core.PhaseStarting,
+		Steps:     steps,
+		StartedAt: time.Now().Add(-45 * time.Second),
+	}
+	if !stalled(st) {
+		t.Fatal("stalled() should report a step running past stuckAfter")
+	}
+	gtx, _ := newTestContext(image.Pt(460, 450))
+	a.splash.Layout(a, gtx, st)
 }
 
 func splashTestSteps() []core.BootStep {
@@ -184,8 +203,12 @@ func TestDiagPageWithReport(t *testing.T) {
 			CNReachable: 3, CNTotal: 5, IntlReachabl: 1, IntlTotal: 7,
 			BlockedPorts: []int{19302},
 			Probes: []netdiag.UDPProbe{
-				{Target: "stun.miwifi.com:3478", Region: netdiag.RegionCN, OK: true, RTT: 12 * time.Millisecond, Mapped: netip.MustParseAddrPort("1.2.3.4:54321")},
-				{Target: "stun.l.google.com:19302", Region: netdiag.RegionIntl, Err: "i/o timeout"},
+				// A resolved probe: Host names the server, Target is the
+				// address actually hit, and the label must show the former.
+				{Host: "stun.miwifi.com:3478", Target: "111.206.174.2:3478", Name: "小米", Region: netdiag.RegionCN, OK: true, RTT: 12 * time.Millisecond, Mapped: netip.MustParseAddrPort("1.2.3.4:54321")},
+				{Host: "stun.miwifi.com:3478", Target: "[2408::1]:3478", Name: "小米", Region: netdiag.RegionCN, OK: true, RTT: 15 * time.Millisecond, Mapped: netip.MustParseAddrPort("[2001:db8::9]:54321")},
+				// DNS failed, so Target still holds the hostname.
+				{Host: "stun.l.google.com:19302", Target: "stun.l.google.com:19302", Name: "Google", Region: netdiag.RegionIntl, Err: "i/o timeout"},
 			},
 		},
 		NAT: netdiag.NATReport{
@@ -253,15 +276,6 @@ func TestDiagPageWithReport(t *testing.T) {
 	}
 }
 
-// TestOverlayLayout covers the floating (non-docked) overlay, which has a
-// different anchor and a close button the docked one hides.
-func TestOverlayLayout(t *testing.T) {
-	a := testApp(t)
-	a.overlay.visible = true
-	gtx, _ := newTestContext(image.Pt(1000, 700))
-	a.overlay.Layout(a, gtx, false)
-}
-
 func TestFormatHelpers(t *testing.T) {
 	cases := []struct {
 		got, want string
@@ -303,6 +317,58 @@ func TestTrFallsBackToEnglish(t *testing.T) {
 		}
 		if Tr(LangZH, k) == "?" {
 			t.Errorf("key %d has no chinese string", k)
+		}
+	}
+}
+
+// TestGrowOnce guards the window-resize latch. Growing more than once would
+// snap a window the user had deliberately resized back to the shell default
+// every time the service restarted.
+func TestGrowOnce(t *testing.T) {
+	a := testApp(t)
+	// A Window with no driver queues options instead of touching a display,
+	// which is what makes this testable without one.
+	w := new(app.Window)
+
+	if a.grown.Load() {
+		t.Fatal("a fresh App must not be marked grown")
+	}
+	a.grow(w)
+	if !a.grown.Load() {
+		t.Fatal("grow() must latch")
+	}
+	// Must be a no-op now.
+	a.grow(w)
+	a.grow(w)
+}
+
+// TestStatTilesUniformHeight guards the overview's top row. The tiles sit in a
+// Flex, which does not equalise child heights, so anything that makes one tile
+// taller — a wrapped value, a hint line present on some tiles but not others —
+// visibly misaligns the row. Narrow widths are the interesting case: that is
+// where "19 / 25" wraps and "8" does not.
+func TestStatTilesUniformHeight(t *testing.T) {
+	a := testApp(t)
+	tiles := []struct{ value, label, hint string }{
+		{"19 / 25", "在线节点", "3 已关联"},
+		{"8", "本机服务", "5 已广播"},
+		{"8 / 0", "连接规则 / 转发规则", ""},
+		{"10s", "运行时长", ""},
+	}
+	for _, w := range []int{60, 80, 100, 140, 200, 300} {
+		var first int
+		for i, c := range tiles {
+			gtx, _ := newTestContext(image.Pt(w, 400))
+			gtx.Constraints.Min = image.Point{}
+			h := a.overview.statTile(a, gtx, c.value, c.label, c.hint, LevelNeutral, IconNodes).Size.Y
+			if i == 0 {
+				first = h
+				continue
+			}
+			if h != first {
+				t.Errorf("width=%d: tile %q is %dpx, tile %q is %dpx — the row must be flush",
+					w, c.label, h, tiles[0].label, first)
+			}
 		}
 	}
 }

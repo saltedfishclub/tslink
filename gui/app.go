@@ -12,12 +12,12 @@ import (
 	"gioui.org/app"
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
+	"gioui.org/io/system"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/text"
-	"gioui.org/unit"
 	"gioui.org/widget"
 
 	"tslink/core"
@@ -43,7 +43,6 @@ type pageID int
 const (
 	pageOverview pageID = iota
 	pagePeers
-	pageLan
 	pageDiag
 	pageLogs
 	pageSettings
@@ -71,16 +70,21 @@ type App struct {
 
 	overview *overviewPage
 	peers    *peersPage
-	lan      *lanPage
 	diag     *diagPage
 	logs     *logsPage
 	settings *settingsPage
 
-	splash  *splashView
-	overlay *logOverlay
+	splash *splashView
 
-	overlayBtn widget.Clickable
-	themeBtn   widget.Clickable
+	themeBtn widget.Clickable
+
+	// grown records that the window has already been resized from its compact
+	// splash dimensions to the full shell. The splash sizes the window to just
+	// its progress bar and checklist, so the transition to the shell has to grow
+	// it — exactly once, or a user who resized the window would have it snapped
+	// back every time the service restarted. Atomic because the resize runs on
+	// the watch goroutine, not the UI one.
+	grown atomic.Bool
 
 	toastMsg   string
 	toastLevel StatusLevel
@@ -121,19 +125,16 @@ func New(opt Options) *App {
 	a.nav = []navEntry{
 		{id: pageOverview, label: KNavOverview, icon: IconGrid},
 		{id: pagePeers, label: KNavPeers, icon: IconNodes},
-		{id: pageLan, label: KNavLan, icon: IconBroadcast},
 		{id: pageDiag, label: KNavDiag, icon: IconPulse},
 		{id: pageLogs, label: KNavLogs, icon: IconList},
 		{id: pageSettings, label: KNavSettings, icon: IconSliders},
 	}
 	a.overview = newOverviewPage()
 	a.peers = newPeersPage()
-	a.lan = newLanPage()
 	a.diag = newDiagPage(a)
 	a.logs = newLogsPage(a)
 	a.settings = newSettingsPage(a)
 	a.splash = newSplashView()
-	a.overlay = newLogOverlay()
 	return a
 }
 
@@ -141,15 +142,24 @@ func New(opt Options) *App {
 // closes.
 func (a *App) Run(ctx context.Context) error {
 	w := new(app.Window)
+	// Opens at splash size; grown to the shell dimensions below once the
+	// service is ready.
 	w.Option(
 		app.Title("tslink"),
-		app.Size(unit.Dp(1120), unit.Dp(740)),
-		app.MinSize(unit.Dp(880), unit.Dp(560)),
+		app.Size(splashWindowW, splashWindowH),
+		app.MinSize(splashMinW, splashMinH),
 	)
 	a.win = w
 
 	go a.watch(ctx, w)
 	go a.upgradeFonts()
+	// Ctrl+C at the terminal cancels ctx. Without this the supervisor tears
+	// down but the window survives, dropping the user back to the splash — the
+	// GUI is the process, so cancelling it has to close the window too.
+	go func() {
+		<-ctx.Done()
+		w.Perform(system.ActionClose)
+	}()
 
 	var ops op.Ops
 	for {
@@ -161,8 +171,32 @@ func (a *App) Run(ctx context.Context) error {
 			a.applyFontUpgrade()
 			a.layout(gtx)
 			e.Frame(gtx.Ops)
+			// After the frame, so the resize is not applied midway through
+			// laying one out against the old constraints. Once grown this is a
+			// single atomic load.
+			if !a.grown.Load() && a.state().Ready() {
+				a.grow(w)
+			}
 		}
 	}
+}
+
+// grow resizes the window from its compact splash dimensions to the full shell,
+// once, when the service comes up.
+//
+// It must run on the goroutine that drives the event loop. On Linux the driver
+// executes Window.Option's work inline on the calling goroutine rather than
+// handing it to a UI thread, so calling this from anywhere else would mutate
+// driver state concurrently with event dispatch.
+func (a *App) grow(w *app.Window) {
+	if a.grown.Swap(true) {
+		return
+	}
+	w.Option(
+		app.Size(shellWindowW, shellWindowH),
+		app.MinSize(shellMinW, shellMinH),
+	)
+	w.Invalidate()
 }
 
 // upgradeFonts parses the system CJK font off the UI goroutine. The splash
@@ -295,6 +329,18 @@ func (a *App) copyToClipboard(gtx C, s string, msg string) {
 	a.notify(msg, LevelOK)
 }
 
+// reveal shows path in the platform file manager, off the UI goroutine so a
+// slow or missing file manager cannot stall a frame. Failure is logged rather
+// than surfaced: the file is already written and its path is already on screen,
+// so there is nothing for the user to act on.
+func (a *App) reveal(path string) {
+	go func() {
+		if err := RevealInFileManager(path, a.logger); err != nil {
+			a.logger.Warn("could not open the file manager", "path", path, "err", err)
+		}
+	}()
+}
+
 // notify shows a transient message at the bottom of the window.
 func (a *App) notify(msg string, level StatusLevel) {
 	a.toastMsg = msg
@@ -325,9 +371,6 @@ func (a *App) layout(gtx C) D {
 			a.current = a.nav[i].id
 		}
 	}
-	if a.overlayBtn.Clicked(gtx) {
-		a.overlay.visible = !a.overlay.visible
-	}
 	if a.themeBtn.Clicked(gtx) {
 		th.SetDark(!th.Dark)
 	}
@@ -340,10 +383,6 @@ func (a *App) layout(gtx C) D {
 				return a.splash.Layout(a, gtx, st)
 			}
 			return a.shell(gtx, st)
-		}),
-		layout.Stacked(func(gtx C) D {
-			gtx.Constraints.Min = gtx.Constraints.Max
-			return a.overlay.Layout(a, gtx, !st.Ready())
 		}),
 		layout.Stacked(func(gtx C) D {
 			gtx.Constraints.Min = gtx.Constraints.Max
@@ -379,8 +418,6 @@ func (a *App) page(gtx C, st core.State) D {
 	switch a.current {
 	case pagePeers:
 		return a.peers.Layout(a, gtx, st)
-	case pageLan:
-		return a.lan.Layout(a, gtx, st)
 	case pageDiag:
 		return a.diag.Layout(a, gtx, st)
 	case pageLogs:
@@ -537,14 +574,6 @@ func (a *App) header(gtx C, st core.State) D {
 					layout.Rigid(func(gtx C) D { return a.statusPill(gtx, st) }),
 					HGap(SpaceSM),
 					layout.Rigid(func(gtx C) D {
-						icon := IconList
-						level := LevelNeutral
-						if a.overlay.visible {
-							level = LevelInfo
-						}
-						return th.IconButton(gtx, &a.overlayBtn, icon, level)
-					}),
-					layout.Rigid(func(gtx C) D {
 						return th.IconButton(gtx, &a.themeBtn, IconGlobe, LevelNeutral)
 					}),
 				)
@@ -674,4 +703,39 @@ func (a *App) sectionTitle(gtx C, title, subtitle string, trailing layout.Widget
 			}),
 		)
 	})
+}
+
+// diagnosticHeader is the metadata block prepended to any exported log bundle,
+// so a paste is self-describing without the reporter having to explain their
+// setup.
+func (a *App) diagnosticHeader() string {
+	st := a.state()
+	var b strings.Builder
+	b.WriteString("# tslink diagnostic bundle\n")
+	b.WriteString("# version: " + a.opt.Version + "\n")
+	b.WriteString("# os/arch: " + runtimeInfo() + "\n")
+	if a.opt.ConfigURL != "" {
+		b.WriteString("# config: (url)\n")
+	} else if a.opt.ConfigPath != "" {
+		b.WriteString("# config: " + a.opt.ConfigPath + "\n")
+	}
+	b.WriteString("# phase: " + st.Phase.String() + "\n")
+	b.WriteString("# restarts: " + itoa(st.Restarts) + "\n")
+	if !st.ReadyAt.IsZero() {
+		b.WriteString("# uptime: " + FormatDuration(timeSince(st.ReadyAt)) + "\n")
+	}
+	if st.Peers != nil {
+		snap := st.Peers.Snapshot()
+		b.WriteString("# tailnet: " + snap.TailnetName + "\n")
+		b.WriteString("# peers: " + itoa(len(snap.Peers)) + "\n")
+	}
+	// reportText takes the diag page's lock; reading a.diag.report directly
+	// would race the background diagnostic goroutine.
+	if a.diag != nil {
+		if txt := a.diag.reportText(); txt != "" {
+			b.WriteString("#\n")
+			b.WriteString(txt)
+		}
+	}
+	return b.String()
 }

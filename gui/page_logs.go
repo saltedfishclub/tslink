@@ -153,6 +153,7 @@ func (p *logsPage) handleActions(a *App, gtx C, buf *core.LogBuffer) {
 			a.notify(th.T(KError)+": "+err.Error(), LevelFail)
 		} else {
 			a.notify(path, LevelOK)
+			a.reveal(path)
 		}
 	}
 	if p.uploadBtn.Clicked(gtx) {

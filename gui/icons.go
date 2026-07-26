@@ -257,14 +257,6 @@ func IconWarn(gtx C, size int, col color.NRGBA) D {
 	return d
 }
 
-// IconClose dismisses an overlay.
-func IconClose(gtx C, size int, col color.NRGBA) D {
-	return iconCanvas(gtx, size, col, defaultStroke, func(p *clip.Path, pt func(x, y float32) f32.Point) {
-		line(p, pt, 0.24, 0.24, 0.76, 0.76)
-		line(p, pt, 0.76, 0.24, 0.24, 0.76)
-	})
-}
-
 // IconChevronRight indicates an expandable row.
 func IconChevronRight(gtx C, size int, col color.NRGBA) D {
 	return iconCanvas(gtx, size, col, defaultStroke, func(p *clip.Path, pt func(x, y float32) f32.Point) {

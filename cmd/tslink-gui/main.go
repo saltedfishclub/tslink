@@ -2,7 +2,7 @@
 //
 // It runs the same service the headless binary does — see the root main.go —
 // but supervises it in-process so the window can show tailnet peer health,
-// latency history, Minecraft servers announced on the LAN, and a full network
+// latency history, the services tslink is forwarding, and a full network
 // diagnostic run, plus a searchable log view that can be shared to a paste
 // service for support.
 //

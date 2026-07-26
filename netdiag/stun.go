@@ -647,6 +647,7 @@ func ProbeUDP(ctx context.Context, servers []STUNServer, logger *slog.Logger) UD
 				mu.Lock()
 				per[i] = []udpAttempt{{
 					probe: UDPProbe{
+						Host:   srv.Host,
 						Target: srv.Host,
 						Name:   srv.Name,
 						Region: srv.Region,
@@ -734,6 +735,7 @@ func stunProbeUDPServer(ctx context.Context, srv STUNServer, log *slog.Logger) [
 	if err != nil {
 		return []udpAttempt{{
 			probe: UDPProbe{
+				Host:   srv.Host,
 				Target: srv.Host,
 				Name:   srv.Name,
 				Region: srv.Region,
@@ -756,7 +758,7 @@ func stunProbeUDPServer(ctx context.Context, srv STUNServer, log *slog.Logger) [
 			doneV4 = true
 		}
 		dst := netip.AddrPortFrom(a, port)
-		p := UDPProbe{Target: dst.String(), Name: srv.Name, Region: srv.Region, Port: int(port)}
+		p := UDPProbe{Host: srv.Host, Target: dst.String(), Name: srv.Name, Region: srv.Region, Port: int(port)}
 		pctx, cancel := context.WithTimeout(ctx, stunProbeTimeout)
 		msg, _, rtt, err := stunQuery(pctx, dst, 0, stunAttempts, stunInterval)
 		cancel()

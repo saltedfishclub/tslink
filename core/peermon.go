@@ -154,6 +154,7 @@ type PeerMonitor struct {
 
 	refreshStatus chan struct{}
 	refreshPing   chan struct{}
+	refreshLinks  chan struct{}
 
 	mu      sync.RWMutex
 	raw     *ipnstate.Status // last good status, nil until the first poll lands
@@ -180,6 +181,7 @@ func NewPeerMonitor(srv *tsnet.Server, rules map[string][]ConnectRule, logger *s
 		opt:           opt.withDefaults(),
 		refreshStatus: make(chan struct{}, 1),
 		refreshPing:   make(chan struct{}, 1),
+		refreshLinks:  make(chan struct{}, 1),
 		hist:          make(map[string][]PeerSample),
 		last:          make(map[string]pingOutcome),
 		links:         make(map[netip.Addr][]string),
@@ -196,9 +198,14 @@ func (m *PeerMonitor) Start(ctx context.Context) {
 }
 
 // RefreshNow triggers an immediate status+ping cycle without blocking the caller.
+//
+// Link resolution is kicked too. It normally runs every linkResolveInterval,
+// but the GUI now lists only linked peers, so a user staring at an empty page
+// after a DNS hiccup has no other way to ask for a retry.
 func (m *PeerMonitor) RefreshNow() {
 	kick(m.refreshStatus)
 	kick(m.refreshPing)
+	kick(m.refreshLinks)
 }
 
 // kick delivers a coalescing wakeup: a pending signal is enough.
@@ -533,6 +540,8 @@ func (m *PeerMonitor) linkLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			m.resolveLinks(ctx)
+		case <-m.refreshLinks:
 			m.resolveLinks(ctx)
 		}
 	}

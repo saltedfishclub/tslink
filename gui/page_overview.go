@@ -1,11 +1,13 @@
 package gui
 
 import (
+	"image"
 	"strings"
 	"time"
 
 	"gioui.org/font"
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
@@ -18,6 +20,8 @@ type overviewPage struct {
 	diagBtn  widget.Clickable
 	peersBtn widget.Clickable
 	copySelf widget.Clickable
+	// svcCopy holds one clickable per service address, allocated on demand.
+	svcCopy map[string]*widget.Clickable
 }
 
 func newOverviewPage() *overviewPage {
@@ -41,19 +45,17 @@ func (p *overviewPage) Layout(a *App, gtx C, st core.State) D {
 	if st.Peers != nil {
 		snap = st.Peers.Snapshot()
 	}
-	var lanServers []core.LanServer
-	if st.Lan != nil {
-		lanServers = st.Lan.Servers()
-	}
+	servers := buildServices(st.Config, snap)
 
 	if p.copySelf.Clicked(gtx) {
 		a.copyToClipboard(gtx, selfAddrText(snap.Self), "")
 	}
 
 	items := []layout.Widget{
-		func(gtx C) D { return p.statRow(a, gtx, st, snap, lanServers) },
+		func(gtx C) D { return p.statRow(a, gtx, st, snap, servers) },
 		func(gtx C) D { return p.healthCard(a, gtx) },
 		func(gtx C) D { return p.selfCard(a, gtx, st, snap) },
+		func(gtx C) D { return p.servicesCard(a, gtx, servers) },
 		func(gtx C) D { return p.linkedCard(a, gtx, snap) },
 	}
 	return material.List(th.Theme, &p.list).Layout(gtx, len(items), func(gtx C, i int) D {
@@ -88,19 +90,29 @@ func (p *overviewPage) statTile(a *App, gtx C, value, label, hint string, level 
 				if level != LevelNeutral {
 					l.Color = th.StatusColor(level)
 				}
-				return l.Layout(gtx)
+				// Single line, always. A value like "19 / 25" wraps at narrow
+				// tile widths where "8" does not, and one tile a whole line
+				// taller than its neighbours is what makes the row look broken.
+				return OneLine(l).Layout(gtx)
 			}),
 			layout.Rigid(func(gtx C) D {
-				if hint == "" {
-					return D{}
+				if hint != "" {
+					return OneLine(th.Caption(hint)).Layout(gtx)
 				}
-				return OneLine(th.Caption(hint)).Layout(gtx)
+				// Reserve the hint line even when there is no hint. These tiles
+				// sit in a row, and Flex does not equalise child heights, so a
+				// tile that skipped this line came out shorter than its
+				// neighbours and the row looked misaligned.
+				macro := op.Record(gtx.Ops)
+				d := OneLine(th.Caption("X")).Layout(gtx)
+				macro.Stop()
+				return D{Size: image.Pt(0, d.Size.Y)}
 			}),
 		)
 	})
 }
 
-func (p *overviewPage) statRow(a *App, gtx C, st core.State, snap core.PeerSnapshot, lan []core.LanServer) D {
+func (p *overviewPage) statRow(a *App, gtx C, st core.State, snap core.PeerSnapshot, servers []serviceServer) D {
 	th := a.th
 
 	online, linked := 0, 0
@@ -121,10 +133,13 @@ func (p *overviewPage) statRow(a *App, gtx C, st core.State, snap core.PeerSnaps
 			connectRules += len(rs)
 		}
 	}
-	selfLan := 0
-	for _, s := range lan {
-		if s.IsSelf {
-			selfLan++
+	services, broadcast := 0, 0
+	for _, srv := range servers {
+		services += len(srv.Services)
+		for _, svc := range srv.Services {
+			if svc.Broadcast {
+				broadcast++
+			}
 		}
 	}
 
@@ -148,9 +163,9 @@ func (p *overviewPage) statRow(a *App, gtx C, st core.State, snap core.PeerSnaps
 		},
 		func(gtx C) D {
 			return p.statTile(a, gtx,
-				itoa(len(lan)),
-				th.T(KOvLanServers),
-				itoa(selfLan)+" "+th.T(KLanSelf),
+				itoa(services),
+				th.T(KSvcTitle),
+				itoa(broadcast)+" "+th.T(KSvcBroadcast),
 				LevelNeutral, IconServer)
 		},
 		func(gtx C) D {
@@ -202,7 +217,7 @@ func (p *overviewPage) healthCard(a *App, gtx C) D {
 				}
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx C) D {
-						l := th.Text(SizeBody, th.StatusColor(diagLevel(rep.Status)), rep.Headline)
+						l := th.Text(SizeBody, th.StatusColor(diagLevel(rep.HeadlineStatus)), rep.Headline)
 						l.Font.Weight = font.Medium
 						l.MaxLines = 2
 						return l.Layout(gtx)

@@ -221,19 +221,74 @@ func LoadCJKFaces(path string, logger *slog.Logger) ([]font.FontFace, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A pan-CJK .ttc carries SC/TC/HK/JP/KR cuts of the same design. Keeping
-	// only the first regular-weight face avoids paying for five near-identical
-	// fallbacks on every glyph miss.
-	if len(faces) > 1 {
-		faces = faces[:1]
+	if len(faces) == 0 {
+		return nil, nil
 	}
+	// A pan-CJK .ttc carries SC/TC/HK/JP/KR cuts of the same design. Keeping
+	// one avoids paying for five near-identical fallbacks on every glyph miss;
+	// pickCJKFace decides which one.
+	base := faces[pickCJKFace(faces)]
+	out := cjkWeightVariants(base)
 	logger.Debug("cjk font loaded",
 		"path", path,
-		"faces", len(faces),
+		"typeface", string(base.Font.Typeface),
+		"faces", len(out),
 		"bytes", st.Size(),
 		"took", time.Since(start).Round(time.Millisecond),
 	)
-	return faces, nil
+	return out, nil
+}
+
+// scWeights are the family-name markers of the Simplified Chinese cut, in
+// preference order. Pan-CJK collections order their faces JP first, so taking
+// faces[0] blindly renders Han characters with Japanese glyph variants — legible,
+// but visibly wrong to a Chinese reader.
+var scMarkers = []string{"sc", "simplified", "cn", "hans"}
+
+// pickCJKFace returns the index of the face to use, preferring the Simplified
+// Chinese cut and falling back to the first face.
+func pickCJKFace(faces []font.FontFace) int {
+	for _, marker := range scMarkers {
+		for i, f := range faces {
+			name := strings.ToLower(string(f.Font.Typeface))
+			// Match on a word/suffix boundary so "sc" does not hit "Sans".
+			for _, field := range strings.FieldsFunc(name, func(r rune) bool {
+				return r == ' ' || r == '-' || r == '_'
+			}) {
+				if field == marker || strings.HasSuffix(field, marker) {
+					return i
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// cjkWeightVariants registers one parsed face under every weight the UI asks
+// for.
+//
+// This exists because of how Gio resolves fonts. The theme pins every label's
+// Typeface to "Go" (see NewTheme), and Gio never tells go-text which script it
+// is shaping, so our explicitly-loaded CJK font is only reachable through
+// fontscan's user-provided tier — which prunes candidates by weight before
+// checking coverage. A face registered only at Normal is therefore invisible to
+// any label that sets Font.Weight, and every section title, card header and
+// button does exactly that. The result was Chinese body text rendering fine
+// while every heading turned into tofu boxes.
+//
+// The variants share the same underlying Face, so CJK headings are not visually
+// bolder than body text. That is a deliberate trade: identical weight beats
+// missing glyphs, and synthetic emboldening is not available here.
+func cjkWeightVariants(base font.FontFace) []font.FontFace {
+	weights := []font.Weight{font.Normal, font.Medium, font.SemiBold, font.Bold}
+	out := make([]font.FontFace, 0, len(weights))
+	for _, w := range weights {
+		f := base.Font
+		f.Weight = w
+		f.Style = font.Regular
+		out = append(out, font.FontFace{Font: f, Face: base.Face})
+	}
+	return out
 }
 
 // goCollection returns the built-in Go font faces. It exists so tests can

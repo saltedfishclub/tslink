@@ -2,28 +2,52 @@ package gui
 
 import (
 	"image"
+	"log/slog"
 	"math"
 	"time"
 
 	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/layout"
-	"gioui.org/op"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
 	"gioui.org/text"
+	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
 	"tslink/core"
+
+	"gioui.org/op/paint"
 )
+
+// Window geometry. The splash is sized to just its progress bar and checklist —
+// it has nothing else to show, and a loading screen floating in a 1120x740
+// window reads as a broken main window rather than as progress. App.layout
+// grows the window to the shell dimensions once the service is ready.
+const (
+	splashWindowW unit.Dp = 460
+	splashWindowH unit.Dp = 450
+	splashMinW    unit.Dp = 380
+	splashMinH    unit.Dp = 380
+
+	shellWindowW unit.Dp = 1120
+	shellWindowH unit.Dp = 740
+	shellMinW    unit.Dp = 880
+	shellMinH    unit.Dp = 560
+)
+
+// stuckAfter is how long a single boot step may run before the splash offers
+// the log export. Tailscale's first connection legitimately takes several
+// seconds, so this has to be long enough not to cry wolf, but short enough that
+// someone staring at a hung step is told what to do about it.
+const stuckAfter = 20 * time.Second
 
 // splashView is the loading screen. It covers the window until the service is
 // up, which is also the window during which the CJK font is parsed and
 // tailscale negotiates its first connection — both slow enough that showing a
 // bare grey rectangle would read as a hang.
 type splashView struct {
-	retry widget.Clickable
+	retry  widget.Clickable
+	export widget.Clickable
 	// list keeps the panel reachable on short windows. Without it the retry
 	// button — the one control on this screen — falls off the bottom edge once
 	// the checklist and an error message are both showing.
@@ -56,6 +80,16 @@ func stepTitle(th *Theme, key string) string {
 	}
 }
 
+// stalled reports whether a step has been running long enough to look stuck.
+func stalled(st core.State) bool {
+	for _, step := range st.Steps {
+		if step.State == core.StepRunning && step.Elapsed() >= stuckAfter {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *splashView) Layout(a *App, gtx C, st core.State) D {
 	th := a.th
 	paint.Fill(gtx.Ops, th.P.Bg)
@@ -63,40 +97,49 @@ func (s *splashView) Layout(a *App, gtx C, st core.State) D {
 	if s.retry.Clicked(gtx) && a.opt.Supervisor != nil {
 		a.opt.Supervisor.Restart()
 	}
-
-	// The docked log sheet sits along the bottom edge, so the panel is centred
-	// in whatever is left above it. Reserving the space rather than stacking
-	// the two is the whole point: a screenshot taken mid-load has to show both
-	// the checklist and the log.
-	reserve := dockedReserve(gtx)
-	if maxReserve := gtx.Constraints.Max.Y / 2; reserve > maxReserve {
-		reserve = maxReserve
+	if s.export.Clicked(gtx) {
+		s.exportLogs(a)
 	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Flexed(1, func(gtx C) D {
-			// A single-element list: centred when it fits, scrollable when the
-			// window is too short for the checklist plus an error message.
-			return material.List(th.Theme, &s.list).Layout(gtx, 1, func(gtx C, _ int) D {
-				return layout.Center.Layout(gtx, func(gtx C) D {
-					gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(460))
-					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					return layout.Inset{Top: SpaceLG, Bottom: SpaceLG}.Layout(gtx, func(gtx C) D {
-						return s.panel(a, gtx, st)
-					})
-				})
+
+	// A single-element list: centred when it fits, scrollable when the window is
+	// too short for the checklist plus an error message.
+	return material.List(th.Theme, &s.list).Layout(gtx, 1, func(gtx C, _ int) D {
+		return layout.Center.Layout(gtx, func(gtx C) D {
+			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(400))
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return layout.Inset{
+				Top: SpaceLG, Bottom: SpaceLG, Left: SpaceMD, Right: SpaceMD,
+			}.Layout(gtx, func(gtx C) D {
+				return s.panel(a, gtx, st)
 			})
-		}),
-		layout.Rigid(func(gtx C) D { return D{Size: image.Pt(0, reserve)} }),
-	)
+		})
+	})
+}
+
+// exportLogs writes the current buffer to a file and reports where it went.
+// This is the splash's replacement for the live log tail: someone looking at a
+// stuck boot needs the log in a file they can attach, not on screen.
+func (s *splashView) exportLogs(a *App) {
+	if a.opt.Logs == nil {
+		return
+	}
+	content := a.opt.Logs.ExportText(core.ExportOptions{
+		Header: a.diagnosticHeader(),
+		// Debug and up: a stuck boot is exactly when the quiet records matter.
+		Query: core.LogQuery{MinLevel: slog.LevelDebug},
+	})
+	path, err := saveLogFile(content)
+	if err != nil {
+		a.notify(a.th.T(KError)+": "+err.Error(), LevelFail)
+		return
+	}
+	a.notify(path, LevelOK)
+	a.reveal(path)
 }
 
 func (s *splashView) panel(a *App, gtx C, st core.State) D {
 	th := a.th
 	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-		layout.Rigid(func(gtx C) D {
-			return s.pulse(a, gtx, st)
-		}),
-		VGap(SpaceMD),
 		layout.Rigid(func(gtx C) D {
 			l := th.Text(SizeDisplay, th.P.TextPri, "tslink")
 			l.Font.Weight = font.Bold
@@ -120,49 +163,6 @@ func (s *splashView) panel(a *App, gtx C, st core.State) D {
 			return s.footer(a, gtx, st)
 		}),
 	)
-}
-
-// pulse draws concentric rings radiating from a solid core. Three rings offset
-// in phase read as continuous motion without a spinning element, which suits a
-// "connecting to a network" wait better than a rotating arc.
-func (s *splashView) pulse(a *App, gtx C, st core.State) D {
-	th := a.th
-	size := gtx.Dp(64)
-	center := f32.Pt(float32(size)/2, float32(size)/2)
-
-	col := th.P.Accent
-	switch st.Phase {
-	case core.PhaseError:
-		col = th.P.Fail
-	case core.PhaseRetrying:
-		col = th.P.Warn
-	}
-
-	const period = 2400 * time.Millisecond
-	base := float32(gtx.Dp(14))
-	grow := float32(size)/2 - base
-
-	if st.Phase != core.PhaseError {
-		phase := float64(gtx.Now.UnixNano()%int64(period)) / float64(period)
-		for i := 0; i < 3; i++ {
-			p := math.Mod(phase+float64(i)/3, 1)
-			r := base + grow*float32(p)
-			// Ease the fade so rings vanish before they hit the edge.
-			alpha := float32(1-p) * 0.55
-			drawArc(gtx, center, r, float32(gtx.Dp(1.5)), 0, 2*math.Pi, WithAlpha(col, alpha))
-		}
-		// A 2.4s cycle does not need 25fps, and this is the one animation that
-		// can legitimately run for minutes while tailscale negotiates.
-		animateSlow(gtx)
-	}
-
-	// Solid core.
-	d := gtx.Dp(22)
-	off := op.Offset(image.Pt((size-d)/2, (size-d)/2)).Push(gtx.Ops)
-	Circle(gtx, d, col)
-	off.Pop()
-
-	return D{Size: image.Pt(size, size)}
 }
 
 func (s *splashView) checklist(a *App, gtx C, st core.State) D {
@@ -226,11 +226,19 @@ func (s *splashView) stepRow(a *App, gtx C, step core.BootStep) D {
 				)
 			}),
 			layout.Rigid(func(gtx C) D {
-				if step.State != core.StepDone || step.Elapsed() < 100*time.Millisecond {
+				// A running step shows its timer once it is slow enough to be
+				// worth watching; a finished one shows what it cost.
+				switch {
+				case step.State == core.StepRunning && step.Elapsed() >= time.Second:
+				case step.State == core.StepDone && step.Elapsed() >= 100*time.Millisecond:
+				default:
 					return D{}
 				}
-				return th.MonoLabel(SizeCaption, th.P.TextDim,
-					FormatLatency(step.Elapsed())).Layout(gtx)
+				col := th.P.TextDim
+				if step.State == core.StepRunning && step.Elapsed() >= stuckAfter {
+					col = th.P.Warn
+				}
+				return th.MonoLabel(SizeCaption, col, FormatLatency(step.Elapsed())).Layout(gtx)
 			}),
 		)
 	})
@@ -238,60 +246,72 @@ func (s *splashView) stepRow(a *App, gtx C, step core.BootStep) D {
 
 func (s *splashView) footer(a *App, gtx C, st core.State) D {
 	th := a.th
+	stuck := stalled(st)
+
 	return layout.Inset{Top: SpaceLG}.Layout(gtx, func(gtx C) D {
-		switch st.Phase {
-		case core.PhaseError:
-			// Error text and the retry button sit side by side: stacking them
-			// pushes the only control on this screen below the fold on a short
-			// window.
-			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Flexed(1, func(gtx C) D {
-					l := th.Text(SizeCaption, th.P.Fail, st.Err)
-					l.MaxLines = 4
+		return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx C) D {
+				switch st.Phase {
+				case core.PhaseError:
+					// Error text and the retry button sit side by side: stacking
+					// them pushes the only control on this screen below the fold
+					// on a short window.
+					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+						layout.Flexed(1, func(gtx C) D {
+							l := th.Text(SizeCaption, th.P.Fail, st.Err)
+							l.MaxLines = 4
+							return l.Layout(gtx)
+						}),
+						HGap(SpaceMD),
+						layout.Rigid(func(gtx C) D {
+							gtx.Constraints.Min.X = 0
+							return th.Button(gtx, &s.retry, ButtonStyle{
+								Kind: ButtonPrimary,
+								Text: th.T(KRetry),
+								Icon: IconRefresh,
+							})
+						}),
+					)
+
+				case core.PhaseRetrying:
+					msg := th.T(KSplashRetry)
+					if st.Err != "" {
+						msg = st.Err
+					}
+					l := th.Text(SizeCaption, th.P.Warn, msg)
+					l.Alignment = text.Middle
+					l.MaxLines = 3
 					return l.Layout(gtx)
-				}),
-				HGap(SpaceMD),
-				layout.Rigid(func(gtx C) D {
-					gtx.Constraints.Min.X = 0
-					return th.Button(gtx, &s.retry, ButtonStyle{
-						Kind: ButtonPrimary,
-						Text: th.T(KRetry),
-						Icon: IconRefresh,
-					})
-				}),
-			)
 
-		case core.PhaseRetrying:
-			msg := th.T(KSplashRetry)
-			if st.Err != "" {
-				msg = st.Err
-			}
-			l := th.Text(SizeCaption, th.P.Warn, msg)
-			l.Alignment = text.Middle
-			l.MaxLines = 3
-			return l.Layout(gtx)
-
-		default:
-			l := th.Caption(th.T(KSplashHint))
-			l.Alignment = text.Middle
-			return l.Layout(gtx)
-		}
+				default:
+					hint, col := th.T(KSplashHint), th.P.TextDim
+					if stuck {
+						hint, col = th.T(KSplashStuckHint), th.P.Warn
+					}
+					l := th.Text(SizeCaption, col, hint)
+					l.Alignment = text.Middle
+					l.MaxLines = 3
+					return l.Layout(gtx)
+				}
+			}),
+			VGap(SpaceMD),
+			layout.Rigid(func(gtx C) D {
+				if a.opt.Logs == nil {
+					return D{}
+				}
+				// Promoted once something looks stuck: that is the moment the
+				// log is worth exporting.
+				kind := ButtonGhost
+				if stuck || st.Phase == core.PhaseError {
+					kind = ButtonSubtle
+				}
+				gtx.Constraints.Min.X = 0
+				return th.Button(gtx, &s.export, ButtonStyle{
+					Kind: kind,
+					Text: th.T(KSplashExportLog),
+					Icon: IconSave,
+				})
+			}),
+		)
 	})
-}
-
-// ---------------------------------------------------------------------------
-// Shared: a translucent panel backdrop
-// ---------------------------------------------------------------------------
-
-// glassPanel fills the current bounds with a translucent surface plus border.
-// It is what makes the log overlay readable over whatever is behind it while
-// still showing that something is behind it.
-func glassPanel(t *Theme, gtx C, size image.Point, radius float32) {
-	r := int(radius)
-	bg := t.P.BgElevated
-	bg.A = 0xE0
-	paint.FillShape(gtx.Ops, bg, clip.UniformRRect(image.Rectangle{Max: size}, r).Op(gtx.Ops))
-	spec := clip.UniformRRect(image.Rectangle{Max: size}, r).Path(gtx.Ops)
-	paint.FillShape(gtx.Ops, WithAlpha(t.P.BorderHi, 0.8),
-		clip.Stroke{Path: spec, Width: 1}.Op())
 }

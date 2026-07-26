@@ -96,7 +96,6 @@ type State struct {
 	Config *Config
 	Server *tsnet.Server
 	Peers  *PeerMonitor
-	Lan    *LanScanner
 }
 
 // Ready reports whether the service finished booting.
@@ -414,13 +413,8 @@ func (s *Supervisor) boot(ctx context.Context) error {
 	peers := NewPeerMonitor(srv, cfg.Connect, s.logger, PeerMonitorOptions{})
 	peers.Start(ctx)
 
-	lan := NewLanScanner(s.logger.With("from", "lan_scan"))
-	lan.SetSelfEntries(LanEntriesFromRules(cfg.Connect))
-	lan.Start(ctx)
-
 	s.update(func(st *State) {
 		st.Peers = peers
-		st.Lan = lan
 	})
 	s.stepDone(StepKeyMonitors, nil)
 
@@ -457,7 +451,6 @@ func (s *Supervisor) teardown() {
 	srv := s.state.Server
 	s.state.Server = nil
 	s.state.Peers = nil
-	s.state.Lan = nil
 	s.mu.Unlock()
 
 	if srv != nil {

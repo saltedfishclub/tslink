@@ -139,19 +139,10 @@ func Circle(gtx C, diameter int, col color.NRGBA) D {
 // window must settle at zero frames per second, not a slow trickle.
 const animFrame = 40 * time.Millisecond
 
-// animSlowFrame is the cadence for ambient motion with a multi-second cycle,
-// where 12fps is indistinguishable from 25 but costs half as much.
-const animSlowFrame = 80 * time.Millisecond
-
 // animate requests the next animation frame at the capped rate. Every animated
 // widget in this package goes through it.
 func animate(gtx C) {
 	gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(animFrame)})
-}
-
-// animateSlow is [animate] for slow, decorative motion.
-func animateSlow(gtx C) {
-	gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(animSlowFrame)})
 }
 
 // Spacer returns a fixed-size gap.
@@ -165,6 +156,64 @@ func VGap(v unit.Dp) layout.FlexChild {
 // HGap is a horizontal gap.
 func HGap(v unit.Dp) layout.FlexChild {
 	return layout.Rigid(layout.Spacer{Width: v}.Layout)
+}
+
+// WrapRow lays children out left to right, starting a new line whenever the
+// next child would not fit. gap is the vertical space between lines; horizontal
+// spacing is left to the children's own insets.
+//
+// Gio's Flex does not wrap — it divides the available space among its children
+// and lets the overflow clip — and gioui.org/x (which has outlay.FlowWrap) is
+// not a dependency, so this measures each child with op.Record and packs the
+// results greedily. Children are recorded once and replayed at their final
+// offset, so the cost is one layout pass, not two.
+func WrapRow(gtx C, gap unit.Dp, children []layout.Widget) D {
+	if len(children) == 0 {
+		return D{}
+	}
+	maxW := gtx.Constraints.Max.X
+
+	// Each child is measured against the full width but with no minimum, so a
+	// child wider than the row still gets a line to itself rather than a
+	// negative constraint.
+	cgtx := gtx
+	cgtx.Constraints.Min = image.Point{}
+
+	type placed struct {
+		call op.CallOp
+		dims D
+		x, y int
+	}
+	var (
+		items         []placed
+		rowW, rowH    int
+		total, lineNo int
+	)
+	vgap := gtx.Dp(gap)
+
+	for _, w := range children {
+		macro := op.Record(gtx.Ops)
+		dims := w(cgtx)
+		call := macro.Stop()
+
+		if rowW > 0 && rowW+dims.Size.X > maxW {
+			// Commit the line and start the next one.
+			total += rowH + vgap
+			rowW, rowH = 0, 0
+			lineNo++
+		}
+		items = append(items, placed{call: call, dims: dims, x: rowW, y: total})
+		rowW += dims.Size.X
+		rowH = max(rowH, dims.Size.Y)
+	}
+	total += rowH
+
+	for _, it := range items {
+		off := op.Offset(image.Pt(it.x, it.y)).Push(gtx.Ops)
+		it.call.Add(gtx.Ops)
+		off.Pop()
+	}
+	return D{Size: image.Pt(maxW, total)}
 }
 
 // Divider draws a hairline separator.

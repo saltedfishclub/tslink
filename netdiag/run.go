@@ -214,7 +214,7 @@ func Run(ctx context.Context, opt Options) *Report {
 		rep.Egress.Status,
 		rep.Tailscale.Status,
 	)
-	rep.Headline = headline(rep)
+	rep.Headline, rep.HeadlineStatus = headline(rep)
 	logger.Info("diagnostics finished",
 		"took", rep.Duration.Round(time.Millisecond),
 		"status", rep.Status.String(),
@@ -232,29 +232,40 @@ func stepTitle(key string) string {
 	return key
 }
 
-// headline picks the single most consequential finding. The ordering is by how
-// badly each condition breaks the thing this app exists to do — carry game
-// traffic between peers — not by section order.
-func headline(r *Report) string {
+// headline picks the single most consequential finding, together with that
+// sentence's own severity. The ordering is by how badly each condition breaks
+// the thing this app exists to do — carry game traffic between peers — not by
+// section order.
+//
+// The severity is returned separately because Report.Status is the worst of
+// every section: an unrelated port-mapping failure would otherwise render a
+// "may be affecting" headline in the same red as "is affecting", which is
+// exactly the overstatement this split exists to prevent.
+func headline(r *Report) (string, Status) {
 	switch {
 	case r.NAT.Type == NATUDPBlocked:
-		return "UDP 被完全阻断，无法建立直连，所有流量都会走 DERP 中继"
+		return "UDP 被完全阻断，无法建立直连，所有流量都会走 DERP 中继", StatusFail
 	case !r.UDP.V4OK && !r.UDP.V6OK:
-		return "UDP 探测全部失败，请检查防火墙或网络策略"
+		return "UDP 探测全部失败，请检查防火墙或网络策略", StatusFail
 	case r.NAT.Type == NATSymmetric:
-		return "对称型 NAT：与同样受限的对端难以打洞，连接多半会退回中继"
+		return "对称型 NAT：与同样受限的对端难以打洞，连接多半会退回中继", StatusFail
 	case r.Overseas.Status == StatusFail:
-		return "无法访问任何外部网络"
+		return "无法访问任何外部网络", StatusFail
 	case r.Overseas.Status == StatusWarn:
-		return "境外网络不可达，Tailscale 控制面与 DERP 可能受影响"
+		return "境外网络不可达，Tailscale 控制面与 DERP 可能受影响", StatusWarn
+	case r.Egress.DivergentSTUN:
+		// STUN itself saw several egress addresses: the UDP path Tailscale uses
+		// really does vary per flow.
+		return "STUN 检测到多个出口 IP，代理或分流工具正在影响连接", StatusFail
 	case r.Egress.Divergent:
-		return "检测到多个出口 IP，代理或分流工具正在影响连接"
+		// Only the web path disagreed; UDP may well be intact.
+		return "仅 HTTP 探测到多个出口 IP，代理或分流工具可能影响连接", StatusWarn
 	case r.PortMap.Status == StatusWarn && r.NAT.Type == NATPortRestrict:
-		return "路由器未提供端口映射，NAT 为端口限制型，打洞成功率一般"
+		return "路由器未提供端口映射，NAT 为端口限制型，打洞成功率一般", StatusWarn
 	case r.Status == StatusOK:
-		return "网络状况良好，具备直连条件"
+		return "网络状况良好，具备直连条件", StatusOK
 	default:
-		return "诊断完成，存在若干需要注意的项目"
+		return "诊断完成，存在若干需要注意的项目", r.Status
 	}
 }
 
@@ -319,7 +330,15 @@ func (r *Report) Text() string {
 			status = "OK"
 			detail = p.Mapped.String() + " " + p.RTT.Round(time.Millisecond).String()
 		}
-		w("  %-4s %-34s %-5s %s\n", status, p.Target, p.Region, detail)
+		// Name the server, then the address actually probed — a shared bundle
+		// has to be readable without the reader resolving IPs by hand.
+		target := p.Host
+		if target == "" {
+			target = p.Target
+		} else if p.Target != "" && p.Target != p.Host {
+			target += " (" + p.Target + ")"
+		}
+		w("  %-4s %-46s %-5s %s\n", status, target, p.Region, detail)
 	}
 	b.WriteByte('\n')
 
@@ -389,8 +408,10 @@ func (r *Report) Text() string {
 	if r.Egress.Summary != "" {
 		w("%s\n", r.Egress.Summary)
 	}
-	if r.Egress.Divergent {
-		w("!! 不同探测方式得到了不同的公网 IP，通常说明有代理或分流在生效\n")
+	if r.Egress.DivergentSTUN {
+		w("!! STUN(UDP) 本身看到多个公网 IP，直连打洞会受影响\n")
+	} else if r.Egress.Divergent {
+		w("!! 仅 HTTP 探测得到了不同的公网 IP，STUN(UDP) 出口一致，通常不影响打洞\n")
 	}
 	for _, o := range r.Egress.Observations {
 		val := o.IP.String()

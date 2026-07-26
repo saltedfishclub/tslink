@@ -28,7 +28,6 @@ const (
 	// Navigation.
 	KNavOverview
 	KNavPeers
-	KNavLan
 	KNavDiag
 	KNavLogs
 	KNavSettings
@@ -51,7 +50,8 @@ const (
 	KStepMonitors
 	KStepReady
 	KSplashHint
-	KSplashLogHint
+	KSplashStuckHint
+	KSplashExportLog
 	KSplashRetry
 
 	// Shared vocabulary.
@@ -84,7 +84,6 @@ const (
 	KOvTailnet
 	KOvSelf
 	KOvPeersOnline
-	KOvLanServers
 	KOvForwardRules
 	KOvConnectRules
 	KOvUptime
@@ -95,8 +94,8 @@ const (
 	// Peers page.
 	KPeersTitle
 	KPeersLinked
-	KPeersOther
 	KPeersEmpty
+	KPeersResolving
 	KPeerLatency
 	KPeerRoute
 	KPeerRouteDirect
@@ -123,19 +122,11 @@ const (
 	KGraphWindow
 	KGraphLegendHint
 
-	// LAN page.
-	KLanTitle
-	KLanSubtitle
-	KLanEmpty
-	KLanListening
-	KLanMotd
-	KLanPort
-	KLanAddress
-	KLanSeen
-	KLanSelf
-	KLanSelfHint
-	KLanPackets
-	KLanBindError
+	// Local services (overview).
+	KSvcTitle
+	KSvcSubtitle
+	KSvcEmpty
+	KSvcBroadcast
 
 	// Diagnostics page.
 	KDiagTitle
@@ -174,6 +165,7 @@ const (
 	KDiagEgressGeo
 	KDiagEgressDivergent
 	KDiagEgressDivergentHint
+	KDiagEgressDivergentHTTP
 	KDiagGeoSkipped
 	KDiagPreferredDERP
 	KDiagDerpLatency
@@ -211,7 +203,6 @@ const (
 	KLogsShown
 	KLogsDropped
 	KLogsIncludeDiag
-	KLogsOpenOverlay
 
 	// Settings.
 	KSetTheme
@@ -233,7 +224,6 @@ var zhStrings = [kCount]string{
 
 	KNavOverview: "概览",
 	KNavPeers:    "节点",
-	KNavLan:      "局域网",
 	KNavDiag:     "网络诊断",
 	KNavLogs:     "日志",
 	KNavSettings: "设置",
@@ -246,16 +236,17 @@ var zhStrings = [kCount]string{
 	KStateError:      "出错",
 	KStateRetrying:   "正在重试",
 
-	KStepConfig:    "读取配置",
-	KStepFonts:     "加载字体",
-	KStepTsnet:     "接入 Tailscale 网络",
-	KStepRules:     "解析转发规则",
-	KStepDiscovery: "启动局域网发现",
-	KStepMonitors:  "启动状态监控",
-	KStepReady:     "准备就绪",
-	KSplashHint:    "首次接入 Tailscale 可能需要十几秒",
-	KSplashLogHint: "实时日志（截图时可一并保留）",
-	KSplashRetry:   "启动失败，正在重试",
+	KStepConfig:      "读取配置",
+	KStepFonts:       "加载字体",
+	KStepTsnet:       "接入 Tailscale 网络",
+	KStepRules:       "解析转发规则",
+	KStepDiscovery:   "启动局域网发现",
+	KStepMonitors:    "启动状态监控",
+	KStepReady:       "准备就绪",
+	KSplashHint:      "首次接入 Tailscale 可能需要十几秒",
+	KSplashStuckHint: "当前步骤耗时异常，可导出日志以便排查",
+	KSplashExportLog: "导出日志",
+	KSplashRetry:     "启动失败，正在重试",
 
 	KYes:         "是",
 	KNo:          "否",
@@ -285,7 +276,6 @@ var zhStrings = [kCount]string{
 	KOvTailnet:      "Tailnet",
 	KOvSelf:         "本机",
 	KOvPeersOnline:  "在线节点",
-	KOvLanServers:   "局域网服务器",
 	KOvForwardRules: "转发规则",
 	KOvConnectRules: "连接规则",
 	KOvUptime:       "运行时长",
@@ -295,8 +285,8 @@ var zhStrings = [kCount]string{
 
 	KPeersTitle:         "Tailscale 节点",
 	KPeersLinked:        "已关联",
-	KPeersOther:         "其他节点",
 	KPeersEmpty:         "暂无节点",
+	KPeersResolving:     "正在解析配置中的节点",
 	KPeerLatency:        "延迟",
 	KPeerRoute:          "链路",
 	KPeerRouteDirect:    "直连",
@@ -320,21 +310,13 @@ var zhStrings = [kCount]string{
 	KPeerTags:           "标签",
 	KGraphTitle:         "延迟图谱",
 	KGraphEmpty:         "正在采集延迟数据",
-	KGraphWindow:        "最近 20 分钟",
+	KGraphWindow:        "最近",
 	KGraphLegendHint:    "点击图例可隐藏对应节点",
 
-	KLanTitle:     "局域网 Minecraft 服务器",
-	KLanSubtitle:  "监听 224.0.2.60:4445 的广播",
-	KLanEmpty:     "未发现局域网服务器",
-	KLanListening: "监听中",
-	KLanMotd:      "服务器名称",
-	KLanPort:      "端口",
-	KLanAddress:   "地址",
-	KLanSeen:      "最后广播",
-	KLanSelf:      "本机广播",
-	KLanSelfHint:  "由 tslink 转发并广播，说明隧道已生效",
-	KLanPackets:   "收包",
-	KLanBindError: "无法监听组播",
+	KSvcTitle:     "本机服务",
+	KSvcSubtitle:  "tslink 在本机监听并转发到对应服务器",
+	KSvcEmpty:     "配置中没有连接规则",
+	KSvcBroadcast: "已广播",
 
 	KDiagTitle:               "网络诊断",
 	KDiagRun:                 "开始诊断",
@@ -371,7 +353,8 @@ var zhStrings = [kCount]string{
 	KDiagEgressIP:            "出口 IP",
 	KDiagEgressGeo:           "归属地",
 	KDiagEgressDivergent:     "出口不一致",
-	KDiagEgressDivergentHint: "不同探测方式得到了不同的公网 IP，通常说明有代理或分流工具在生效",
+	KDiagEgressDivergentHint: "STUN（UDP）本身就看到多个公网 IP，直连打洞会受影响",
+	KDiagEgressDivergentHTTP: "仅 HTTP 探测看到不同的公网 IP，STUN（UDP）出口一致，通常不影响打洞",
 	KDiagGeoSkipped:          "已跳过归属地查询",
 	KDiagPreferredDERP:       "首选 DERP",
 	KDiagDerpLatency:         "DERP 延迟",
@@ -407,7 +390,6 @@ var zhStrings = [kCount]string{
 	KLogsShown:       "已显示",
 	KLogsDropped:     "条早期日志已被丢弃",
 	KLogsIncludeDiag: "附带诊断报告",
-	KLogsOpenOverlay: "浮层日志",
 
 	KSetTheme:       "主题",
 	KSetThemeDark:   "深色",
@@ -426,7 +408,6 @@ var enStrings = [kCount]string{
 
 	KNavOverview: "Overview",
 	KNavPeers:    "Peers",
-	KNavLan:      "LAN",
 	KNavDiag:     "Diagnostics",
 	KNavLogs:     "Logs",
 	KNavSettings: "Settings",
@@ -439,16 +420,17 @@ var enStrings = [kCount]string{
 	KStateError:      "Error",
 	KStateRetrying:   "Retrying",
 
-	KStepConfig:    "Loading configuration",
-	KStepFonts:     "Loading fonts",
-	KStepTsnet:     "Joining the tailnet",
-	KStepRules:     "Resolving forward rules",
-	KStepDiscovery: "Starting LAN discovery",
-	KStepMonitors:  "Starting monitors",
-	KStepReady:     "Ready",
-	KSplashHint:    "The first tailnet join can take a dozen seconds",
-	KSplashLogHint: "Live log (stays visible in screenshots)",
-	KSplashRetry:   "Startup failed, retrying",
+	KStepConfig:      "Loading configuration",
+	KStepFonts:       "Loading fonts",
+	KStepTsnet:       "Joining the tailnet",
+	KStepRules:       "Resolving forward rules",
+	KStepDiscovery:   "Starting LAN discovery",
+	KStepMonitors:    "Starting monitors",
+	KStepReady:       "Ready",
+	KSplashHint:      "The first tailnet join can take a dozen seconds",
+	KSplashStuckHint: "This step is taking unusually long — export the log to investigate",
+	KSplashExportLog: "Export log",
+	KSplashRetry:     "Startup failed, retrying",
 
 	KYes:         "Yes",
 	KNo:          "No",
@@ -478,7 +460,6 @@ var enStrings = [kCount]string{
 	KOvTailnet:      "Tailnet",
 	KOvSelf:         "This node",
 	KOvPeersOnline:  "Peers online",
-	KOvLanServers:   "LAN servers",
 	KOvForwardRules: "Forward rules",
 	KOvConnectRules: "Connect rules",
 	KOvUptime:       "Uptime",
@@ -488,8 +469,8 @@ var enStrings = [kCount]string{
 
 	KPeersTitle:         "Tailscale peers",
 	KPeersLinked:        "Linked",
-	KPeersOther:         "Other peers",
 	KPeersEmpty:         "No peers yet",
+	KPeersResolving:     "Resolving the peers named in the config",
 	KPeerLatency:        "Latency",
 	KPeerRoute:          "Route",
 	KPeerRouteDirect:    "Direct",
@@ -513,21 +494,13 @@ var enStrings = [kCount]string{
 	KPeerTags:           "Tags",
 	KGraphTitle:         "Latency graph",
 	KGraphEmpty:         "Collecting latency samples",
-	KGraphWindow:        "last 20 minutes",
+	KGraphWindow:        "last",
 	KGraphLegendHint:    "Click a legend entry to hide that peer",
 
-	KLanTitle:     "Minecraft servers on the LAN",
-	KLanSubtitle:  "Listening for broadcasts on 224.0.2.60:4445",
-	KLanEmpty:     "No LAN servers discovered",
-	KLanListening: "Listening",
-	KLanMotd:      "Name",
-	KLanPort:      "Port",
-	KLanAddress:   "Address",
-	KLanSeen:      "Last broadcast",
-	KLanSelf:      "Ours",
-	KLanSelfHint:  "Advertised by tslink, so the tunnel is working",
-	KLanPackets:   "packets",
-	KLanBindError: "Cannot join multicast group",
+	KSvcTitle:     "Local services",
+	KSvcSubtitle:  "Listening on this machine, forwarded to each server",
+	KSvcEmpty:     "No connect rules configured",
+	KSvcBroadcast: "Broadcast",
 
 	KDiagTitle:               "Network diagnostics",
 	KDiagRun:                 "Run diagnostics",
@@ -564,7 +537,8 @@ var enStrings = [kCount]string{
 	KDiagEgressIP:            "Egress IP",
 	KDiagEgressGeo:           "Location",
 	KDiagEgressDivergent:     "Egress mismatch",
-	KDiagEgressDivergentHint: "Different probes saw different public IPs, which usually means a proxy or split tunnel is active",
+	KDiagEgressDivergentHint: "STUN (UDP) itself saw more than one public IP, so direct connections will suffer",
+	KDiagEgressDivergentHTTP: "Only the HTTP probes disagreed; the STUN (UDP) egress is consistent, so hole punching is usually unaffected",
 	KDiagGeoSkipped:          "Geolocation skipped",
 	KDiagPreferredDERP:       "Preferred DERP",
 	KDiagDerpLatency:         "DERP latency",
@@ -600,7 +574,6 @@ var enStrings = [kCount]string{
 	KLogsShown:       "shown",
 	KLogsDropped:     "earlier entries were dropped",
 	KLogsIncludeDiag: "Include diagnostics",
-	KLogsOpenOverlay: "Log overlay",
 
 	KSetTheme:       "Theme",
 	KSetThemeDark:   "Dark",

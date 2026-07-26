@@ -2,6 +2,7 @@ package gui
 
 import (
 	"context"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -188,7 +189,10 @@ func (p *diagPage) controlCard(a *App, gtx C, running bool, rep *netdiag.Report,
 									col = th.P.TextPri
 								} else if rep != nil {
 									headline = rep.Headline
-									col = th.StatusColor(diagLevel(rep.Status))
+									// The headline's own severity, not the report's: an
+									// unrelated failure elsewhere must not paint a merely
+									// cautionary sentence in alarm red.
+									col = th.StatusColor(diagLevel(rep.HeadlineStatus))
 								}
 								l := th.Text(SizeSubtitle, col, headline)
 								l.Font.Weight = font.SemiBold
@@ -393,6 +397,132 @@ func (p *diagPage) triLabel(th *Theme, v *bool) (string, StatusLevel) {
 	return th.T(KNo), LevelWarn
 }
 
+// A bare "unknown" or "no" in the results tells the user what was measured but
+// not what it costs them. These helpers add the one-line consequence, which is
+// the part that actually answers "should I care".
+//
+// They follow behaviorLabel's inline bilingual switch rather than i18n keys:
+// the strings are explanatory prose, only ever used here.
+
+// behaviorHint explains an RFC 5780 mapping/filtering behaviour.
+func behaviorHint(th *Theme, b netdiag.Behavior) string {
+	zh := th.Lang == LangZH
+	switch b {
+	case netdiag.BehaviorEndpointIndependent:
+		if zh {
+			return "对所有目标复用同一个外部端口，最利于打洞"
+		}
+		return "one external port for every destination — best case for hole punching"
+	case netdiag.BehaviorAddressDependent:
+		if zh {
+			return "换一个目标地址就换一个映射"
+		}
+		return "the mapping changes with the destination address"
+	case netdiag.BehaviorAddressAndPortDependent:
+		if zh {
+			return "目标地址或端口一变映射就变，等同对称型"
+		}
+		return "the mapping changes with address or port — effectively symmetric"
+	default:
+		if zh {
+			return "没有服务器支持 CHANGE-REQUEST，无法判定"
+		}
+		return "no server supported CHANGE-REQUEST, so this could not be determined"
+	}
+}
+
+// hairpinHint explains whether the NAT loops traffic sent to its own external
+// address back inside.
+func hairpinHint(th *Theme, v *bool) string {
+	zh := th.Lang == LangZH
+	switch {
+	case v == nil:
+		if zh {
+			return "未测试"
+		}
+		return "not tested"
+	case *v:
+		if zh {
+			return "同一内网的两台机器可经外网地址互连"
+		}
+		return "two machines behind this NAT can reach each other via the external address"
+	default:
+		if zh {
+			return "同一内网内无法经外网地址回环，需走内网地址"
+		}
+		return "traffic to the external address does not loop back; use the LAN address instead"
+	}
+}
+
+// preserveHint explains whether the external port matches the local one.
+func preserveHint(th *Theme, v *bool) string {
+	zh := th.Lang == LangZH
+	switch {
+	case v == nil:
+		if zh {
+			return "未测试"
+		}
+		return "not tested"
+	case *v:
+		if zh {
+			return "外部端口与本地端口一致，对端更容易预测"
+		}
+		return "the external port matches the local one, so peers can predict it"
+	default:
+		if zh {
+			return "外部端口被改写，端口预测不可靠"
+		}
+		return "the external port is rewritten, so port prediction is unreliable"
+	}
+}
+
+// reachHint labels the CN/international pair, which is otherwise four bare
+// numbers with no indication of what they count.
+func reachHint(th *Theme) string {
+	if th.Lang == LangZH {
+		return "各自可达 / 探测总数"
+	}
+	return "reachable / probed, per region"
+}
+
+// udpFamilyStats counts responding and probed servers per address family.
+// Probes whose DNS lookup failed carry no address and belong to neither.
+func udpFamilyStats(r netdiag.UDPReport) (v4ok, v4n, v6ok, v6n int) {
+	for _, p := range r.Probes {
+		ap, err := netip.ParseAddrPort(p.Target)
+		if err != nil {
+			continue
+		}
+		if ap.Addr().Is4() || ap.Addr().Is4In6() {
+			v4n++
+			if p.OK {
+				v4ok++
+			}
+			continue
+		}
+		v6n++
+		if p.OK {
+			v6ok++
+		}
+	}
+	return
+}
+
+// udpFamilyHint reports how many servers answered on one address family.
+func udpFamilyHint(th *Theme, ok, total int) string {
+	zh := th.Lang == LangZH
+	if total == 0 {
+		if zh {
+			return "没有可探测的地址"
+		}
+		return "no address to probe"
+	}
+	if zh {
+		return itoa(ok) + "/" + itoa(total) + " 台服务器响应"
+	}
+	return itoa(ok) + "/" + itoa(total) + " servers responded"
+}
+
 func (p *diagPage) natCard(a *App, gtx C, r netdiag.NATReport) D {
 	th := a.th
 	hairpin, hairpinLvl := p.triLabel(th, r.Hairpin)
@@ -411,10 +541,10 @@ func (p *diagPage) natCard(a *App, gtx C, r netdiag.NATReport) D {
 			}),
 			layout.Rigid(func(gtx C) D {
 				return th.KVList(gtx, []KV{
-					{Key: th.T(KDiagNatMapping), Value: behaviorLabel(th, r.Mapping)},
-					{Key: th.T(KDiagNatFiltering), Value: behaviorLabel(th, r.Filtering)},
-					{Key: th.T(KDiagNatHairpin), Value: hairpin, Level: hairpinLvl},
-					{Key: th.T(KDiagNatPortPreserve), Value: preserve, Level: preserveLvl},
+					{Key: th.T(KDiagNatMapping), Value: behaviorLabel(th, r.Mapping), Hint: behaviorHint(th, r.Mapping)},
+					{Key: th.T(KDiagNatFiltering), Value: behaviorLabel(th, r.Filtering), Hint: behaviorHint(th, r.Filtering)},
+					{Key: th.T(KDiagNatHairpin), Value: hairpin, Level: hairpinLvl, Hint: hairpinHint(th, r.Hairpin)},
+					{Key: th.T(KDiagNatPortPreserve), Value: preserve, Level: preserveLvl, Hint: preserveHint(th, r.PortPreserving)},
 				})
 			}),
 			layout.Rigid(func(gtx C) D {
@@ -493,6 +623,35 @@ func (p *diagPage) stunTable(a *App, gtx C, results []netdiag.STUNResult) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
+// udpProbeLabel names a UDP probe the way the STUN table names its rows: the
+// operator, then the hostname the user configured.
+//
+// The raw resolved address is not a useful label — nobody recognises
+// 111.206.174.2:3478 as 小米 — but it is the only thing distinguishing the two
+// rows a dual-stack server produces, so the family is appended instead.
+func udpProbeLabel(pr netdiag.UDPProbe) string {
+	host := pr.Host
+	if host == "" {
+		host = pr.Target
+	}
+	label := host
+	if pr.Name != "" {
+		label = pr.Name + " " + host
+	}
+	// Only meaningful when Target is a resolved address rather than a copy of
+	// Host, which is what the DNS-failure path stores.
+	if pr.Target != "" && pr.Target != pr.Host {
+		if ap, err := netip.ParseAddrPort(pr.Target); err == nil {
+			if ap.Addr().Is4() || ap.Addr().Is4In6() {
+				label += " · IPv4"
+			} else {
+				label += " · IPv6"
+			}
+		}
+	}
+	return label
+}
+
 // regionTag prefixes a probe target so the CN/international split — the whole
 // reason both are probed — is visible at a glance.
 func regionTag(th *Theme, r netdiag.Region) string {
@@ -560,15 +719,18 @@ func (p *diagPage) udpCard(a *App, gtx C, r netdiag.UDPReport) D {
 		v6lvl = LevelNeutral
 	}
 
+	v4ok, v4n, v6ok, v6n := udpFamilyStats(r)
+
 	return p.sectionCard(a, gtx, IconGlobe, th.T(KDiagSecUDP), r.Status, r.Summary, func(gtx C) D {
 		rows := []KV{
-			{Key: th.T(KDiagUdpV4), Value: v4, Level: v4lvl},
-			{Key: th.T(KDiagUdpV6), Value: v6, Level: v6lvl},
+			{Key: th.T(KDiagUdpV4), Value: v4, Level: v4lvl, Hint: udpFamilyHint(th, v4ok, v4n)},
+			{Key: th.T(KDiagUdpV6), Value: v6, Level: v6lvl, Hint: udpFamilyHint(th, v6ok, v6n)},
 			{
 				Key: "国内 / 境外",
 				Value: itoa(r.CNReachable) + "/" + itoa(r.CNTotal) + "   " +
 					itoa(r.IntlReachabl) + "/" + itoa(r.IntlTotal),
 				Mono: true,
+				Hint: reachHint(th),
 			},
 		}
 		if th.Lang != LangZH {
@@ -600,7 +762,7 @@ func (p *diagPage) udpCard(a *App, gtx C, r netdiag.UDPReport) D {
 							if !pr.OK {
 								val, level, rtt = orDash(pr.Err), LevelFail, ""
 							}
-							return p.tableRow(a, gtx, regionTag(th, pr.Region)+pr.Target, val, rtt, level)
+							return p.tableRow(a, gtx, regionTag(th, pr.Region)+udpProbeLabel(pr), val, rtt, level)
 						}))
 					}
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
@@ -704,9 +866,14 @@ func (p *diagPage) egressCard(a *App, gtx C, r netdiag.EgressReport) D {
 				if !r.Divergent {
 					return D{}
 				}
+				// Only a split seen by STUN itself threatens the UDP path, so
+				// only that one gets the red treatment.
+				level, hint := LevelWarn, th.T(KDiagEgressDivergentHTTP)
+				if r.DivergentSTUN {
+					level, hint = LevelFail, th.T(KDiagEgressDivergentHint)
+				}
 				return layout.Inset{Bottom: SpaceMD}.Layout(gtx, func(gtx C) D {
-					return p.callout(a, gtx, LevelWarn,
-						th.T(KDiagEgressDivergent), th.T(KDiagEgressDivergentHint))
+					return p.callout(a, gtx, level, th.T(KDiagEgressDivergent), hint)
 				})
 			}),
 			// Geolocation first: "where do I appear to be" is the question, the

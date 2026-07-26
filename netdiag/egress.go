@@ -130,6 +130,7 @@ func ProbeEgress(ctx context.Context, stunResults []STUNResult, logger *slog.Log
 	egSortObservations(rep.Observations)
 	rep.UniqueIPs = egUniqueIPs(rep.Observations)
 	rep.Divergent = egDivergent(rep.UniqueIPs)
+	rep.DivergentSTUN = egDivergentSTUN(rep.Observations)
 	egFinish(&rep)
 
 	log.With(
@@ -221,17 +222,26 @@ func egSortObservations(os []EgressObservation) {
 
 // egUniqueIPs returns the deduplicated, sorted set of valid addresses.
 func egUniqueIPs(os []EgressObservation) []netip.Addr {
-	seen := make(map[netip.Addr]struct{}, len(os))
-	var out []netip.Addr
+	ips := make([]netip.Addr, 0, len(os))
 	for _, o := range os {
-		if !o.IP.IsValid() {
+		ips = append(ips, o.IP)
+	}
+	return egDedupAddrs(ips)
+}
+
+// egDedupAddrs drops invalid and repeated addresses and sorts the rest.
+func egDedupAddrs(ips []netip.Addr) []netip.Addr {
+	seen := make(map[netip.Addr]struct{}, len(ips))
+	var out []netip.Addr
+	for _, ip := range ips {
+		if !ip.IsValid() {
 			continue
 		}
-		if _, dup := seen[o.IP]; dup {
+		if _, dup := seen[ip]; dup {
 			continue
 		}
-		seen[o.IP] = struct{}{}
-		out = append(out, o.IP)
+		seen[ip] = struct{}{}
+		out = append(out, ip)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Compare(out[j]) < 0 })
 	return out
@@ -261,6 +271,22 @@ func egDivergent(ips []netip.Addr) bool {
 	return len(v4) > 1 || len(v6) > 1
 }
 
+// egDivergentSTUN applies the same test to the STUN observations alone.
+//
+// Only these travel the UDP path Tailscale actually uses, so a split visible
+// here is the one that costs you a direct connection. HTTP-only disagreement
+// says something about the browser path, not the tunnel.
+func egDivergentSTUN(obs []EgressObservation) bool {
+	var ips []netip.Addr
+	for _, o := range obs {
+		if o.Method != MethodSTUN || o.Err != "" || !o.IP.IsValid() {
+			continue
+		}
+		ips = append(ips, o.IP.Unmap())
+	}
+	return egDivergent(egDedupAddrs(ips))
+}
+
 // egFinish derives Status and the one-line Chinese Summary from the collected
 // addresses. It is called again by [AnnotateGeo] once geolocation is known, so
 // it must stay idempotent.
@@ -269,6 +295,10 @@ func egFinish(rep *EgressReport) {
 
 	switch {
 	case len(rep.UniqueIPs) == 0:
+		rep.Status = StatusFail
+	case rep.DivergentSTUN:
+		// The UDP egress itself varies, which is what actually costs a direct
+		// connection — a stronger claim than "some probe disagreed".
 		rep.Status = StatusFail
 	case rep.Divergent:
 		rep.Status = StatusWarn
@@ -291,8 +321,15 @@ func egFinish(rep *EgressReport) {
 		if len(v6) > 1 {
 			parts = append(parts, fmt.Sprintf("IPv6 有 %d 个（%s）", len(v6), egJoinAddrs(v6, 4)))
 		}
-		fmt.Fprintf(&b, "出口 IP 不一致：%s，代理、VPN 或多线接入正在拆分流量，对端看到的地址取决于走哪条链路",
-			strings.Join(parts, "；"))
+		if rep.DivergentSTUN {
+			fmt.Fprintf(&b, "出口 IP 不一致：%s，STUN 探测本身就看到多个地址，代理、VPN 或多线接入正在拆分 UDP 流量，对端看到的地址取决于走哪条链路",
+				strings.Join(parts, "；"))
+		} else {
+			// HTTP saw a split that STUN did not: the web path is proxied but
+			// the UDP path Tailscale uses may well be intact.
+			fmt.Fprintf(&b, "出口 IP 不一致：%s，仅 HTTP 探测存在差异，STUN（UDP）出口一致，多为浏览器代理或分流规则所致，通常不影响打洞",
+				strings.Join(parts, "；"))
+		}
 
 	default:
 		var parts []string

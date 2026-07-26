@@ -40,9 +40,12 @@ type ChartSeries struct {
 // ChartStyle configures the plot.
 type ChartStyle struct {
 	Height unit.Dp
-	// Window is how far back the x axis reaches.
-	Window time.Duration
-	// Now anchors the right edge.
+	// MaxWindow caps how far back the x axis reaches. The axis is scaled to the
+	// data's own extent and only clamped by this, so the plot fills its width
+	// from the second sample onward instead of leaving the first N minutes of
+	// the window blank while history accumulates.
+	MaxWindow time.Duration
+	// Now is the wall clock, used only as a fallback when there is no data.
 	Now time.Time
 	// Unit labels the y axis.
 	Unit string
@@ -57,18 +60,68 @@ type Chart struct {
 	hovering bool
 	// plot is the last plotted rectangle, used to map hover x back to a time.
 	plot image.Rectangle
+	// tMin/tMax are the x domain resolved by the last Layout. HoverIndex maps
+	// the pointer through these rather than recomputing from ChartStyle, so the
+	// crosshair cannot disagree with the drawn line.
+	tMin, tMax time.Time
+}
+
+// minPlotSpan keeps the axis sane when every visible sample shares a timestamp,
+// which happens on the very first frame after a refresh.
+const minPlotSpan = 10 * time.Second
+
+// domain resolves the x axis from the visible data, clamped to st.MaxWindow.
+func domain(series []ChartSeries, st ChartStyle) (tMin, tMax time.Time) {
+	now := st.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	window := st.MaxWindow
+	if window <= 0 {
+		window = 3 * time.Minute
+	}
+
+	var first, last time.Time
+	for _, s := range series {
+		if s.Hidden {
+			continue
+		}
+		for _, p := range s.Points {
+			if first.IsZero() || p.At.Before(first) {
+				first = p.At
+			}
+			if last.IsZero() || p.At.After(last) {
+				last = p.At
+			}
+		}
+	}
+	if first.IsZero() {
+		return now.Add(-window), now
+	}
+	// Never show more than the window, however much history is retained.
+	if last.Sub(first) > window {
+		first = last.Add(-window)
+	}
+	if last.Sub(first) < minPlotSpan {
+		first = last.Add(-minPlotSpan)
+	}
+	return first, last
 }
 
 // HoverIndex returns the sample index the pointer is nearest within s, or -1.
-func (c *Chart) HoverIndex(series ChartSeries, st ChartStyle) int {
+func (c *Chart) HoverIndex(series ChartSeries) int {
 	if !c.hovering || len(series.Points) == 0 || c.plot.Dx() <= 0 {
+		return -1
+	}
+	span := c.tMax.Sub(c.tMin)
+	if span <= 0 {
 		return -1
 	}
 	frac := float64(c.hover.X-float32(c.plot.Min.X)) / float64(c.plot.Dx())
 	if frac < 0 || frac > 1 {
 		return -1
 	}
-	target := st.Now.Add(-st.Window).Add(time.Duration(frac * float64(st.Window)))
+	target := c.tMin.Add(time.Duration(frac * float64(span)))
 	best, bestDelta := -1, time.Duration(math.MaxInt64)
 	for i, p := range series.Points {
 		d := p.At.Sub(target)
@@ -81,7 +134,7 @@ func (c *Chart) HoverIndex(series ChartSeries, st ChartStyle) int {
 	}
 	// Only report a match when the nearest sample is genuinely close, so the
 	// crosshair does not snap to a distant point in a sparse series.
-	if bestDelta > st.Window/20 {
+	if bestDelta > span/20 {
 		return -1
 	}
 	return best
@@ -89,9 +142,6 @@ func (c *Chart) HoverIndex(series ChartSeries, st ChartStyle) int {
 
 // Layout draws the chart.
 func (c *Chart) Layout(t *Theme, gtx C, st ChartStyle, series []ChartSeries) D {
-	if st.Window <= 0 {
-		st.Window = 20 * time.Minute
-	}
 	if st.Now.IsZero() {
 		st.Now = gtx.Now
 	}
@@ -114,16 +164,16 @@ func (c *Chart) Layout(t *Theme, gtx C, st ChartStyle, series []ChartSeries) D {
 	c.update(gtx, size)
 
 	yMax := niceMax(maxVisible(series))
-	tMin := st.Now.Add(-st.Window)
+	c.tMin, c.tMax = domain(series, st)
 
-	c.drawGrid(t, gtx, plot, yMax, st)
+	c.drawGrid(t, gtx, plot, yMax, c.tMax.Sub(c.tMin))
 	for _, s := range series {
 		if s.Hidden || len(s.Points) == 0 {
 			continue
 		}
-		c.drawSeries(t, gtx, plot, s, tMin, st.Now, yMax, st.FillSingle && visibleCount(series) == 1)
+		c.drawSeries(t, gtx, plot, s, c.tMin, c.tMax, yMax, st.FillSingle && visibleCount(series) == 1)
 	}
-	c.drawCrosshair(t, gtx, plot, series, st, tMin, yMax)
+	c.drawCrosshair(t, gtx, plot, series, yMax)
 
 	return D{Size: size}
 }
@@ -199,7 +249,7 @@ func niceMax(v float64) float64 {
 	}
 }
 
-func (c *Chart) drawGrid(t *Theme, gtx C, plot image.Rectangle, yMax float64, st ChartStyle) {
+func (c *Chart) drawGrid(t *Theme, gtx C, plot image.Rectangle, yMax float64, span time.Duration) {
 	const rows = 4
 	lineCol := WithAlpha(t.P.Border, 0.9)
 	for i := 0; i <= rows; i++ {
@@ -226,8 +276,8 @@ func (c *Chart) drawGrid(t *Theme, gtx C, plot image.Rectangle, yMax float64, st
 		frac float64
 		txt  string
 	}{
-		{0, "-" + FormatDuration(st.Window)},
-		{0.5, "-" + FormatDuration(st.Window/2)},
+		{0, "-" + FormatDuration(span)},
+		{0.5, "-" + FormatDuration(span/2)},
 		{1, "now"},
 	}
 	if t.Lang == LangZH {
@@ -354,7 +404,7 @@ func (c *Chart) drawSeries(t *Theme, gtx C, plot image.Rectangle, s ChartSeries,
 	}
 }
 
-func (c *Chart) drawCrosshair(t *Theme, gtx C, plot image.Rectangle, series []ChartSeries, st ChartStyle, tMin time.Time, yMax float64) {
+func (c *Chart) drawCrosshair(t *Theme, gtx C, plot image.Rectangle, series []ChartSeries, yMax float64) {
 	if !c.hovering {
 		return
 	}
@@ -371,11 +421,11 @@ func (c *Chart) drawCrosshair(t *Theme, gtx C, plot image.Rectangle, series []Ch
 		if s.Hidden {
 			continue
 		}
-		i := c.HoverIndex(s, st)
+		i := c.HoverIndex(s)
 		if i < 0 || !s.Points[i].OK {
 			continue
 		}
-		pt := pos(plot, tMin, st.Now, yMax, s.Points[i])
+		pt := pos(plot, c.tMin, c.tMax, yMax, s.Points[i])
 		d := gtx.Dp(7)
 		off := op.Offset(image.Pt(int(pt.X)-d/2, int(pt.Y)-d/2)).Push(gtx.Ops)
 		Circle(gtx, d, s.Color)
@@ -402,15 +452,20 @@ type LegendEntry struct {
 
 // Legend renders the chart legend as a wrapping row of toggles. The caller
 // supplies a clickable per entry so hiding a noisy peer is one click away.
+//
+// Wrapping matters here: with the eight series the chart allows, the chips are
+// far wider than the card, and a plain Flex would silently clip the trailing
+// ones — the peers you could no longer toggle were exactly the ones you could
+// no longer identify.
 func (t *Theme) Legend(gtx C, entries []LegendEntry, click func(i int) layout.Widget) D {
 	if len(entries) == 0 {
 		return D{}
 	}
-	children := make([]layout.FlexChild, 0, len(entries))
+	children := make([]layout.Widget, 0, len(entries))
 	for i := range entries {
-		children = append(children, layout.Rigid(click(i)))
+		children = append(children, click(i))
 	}
-	return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEnd}.Layout(gtx, children...)
+	return WrapRow(gtx, 0, children)
 }
 
 // LegendChip draws one legend entry.
@@ -434,7 +489,9 @@ func (t *Theme) LegendChip(gtx C, e LegendEntry, hovered bool) D {
 					return D{Size: image.Pt(w, h)}
 				})
 			}),
-			layout.Rigid(OneLine(t.Text(SizeCaption, fg, e.Name)).Layout),
+			// Bounded: peer names can be long, and one runaway chip would push
+			// every following one onto its own line.
+			layout.Rigid(OneLine(t.Text(SizeCaption, fg, Truncate(e.Name, 22))).Layout),
 			layout.Rigid(func(gtx C) D {
 				if e.Value == "" {
 					return D{}
