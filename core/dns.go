@@ -46,51 +46,113 @@ func GetMagicDNSSuffixFromStatus(st *ipnstate.Status) (string, error) {
 	return suffix, nil
 }
 
-// addr(ip or domain) to tailscale ip
-// check the address is in the tailscale network
+// errNotTailnetPeer reports that a destination resolved successfully but the
+// resulting IP is not carried by any tailnet peer — an ordinary public address.
+// It is distinct from a resolution failure: retrying will not change the answer.
+var errNotTailnetPeer = errors.New("address is not reachable through a tailnet peer")
+
+// resolveAddr maps a destination host (an IP literal or a domain) to the
+// tailnet address of the peer that carries it, so the peer can be pinged for
+// connectivity diagnostics. Names are resolved through the same tailnet-aware
+// path the dial code uses (see resolveHostToIP), so MagicDNS and split-DNS
+// destinations behave identically in both.
 func resolveAddr(ctx context.Context, srv *tsnet.Server, addr string) (*netip.Addr, error) {
-	lc, err := srv.LocalClient()
+	ip, err := netip.ParseAddr(addr)
 	if err != nil {
-		return nil, err
+		ip, err = resolveHostToIP(ctx, srv, addr)
+		if err != nil {
+			return nil, err
+		}
 	}
-	stat, err := lc.Status(ctx)
+
+	stat, err := getCachedStatus(ctx, srv)
 	if err != nil {
 		return nil, err
 	}
 
-	if ip, err := netip.ParseAddr(addr); err == nil {
-		for _, peer := range stat.Peer {
-			for _, ipRange := range peer.AllowedIPs.All() {
-				if ipRange.Contains(ip) {
-					return &peer.TailscaleIPs[0], nil
-				}
+	peer, ok := peerCarryingIP(stat, ip)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s (%s)", errNotTailnetPeer, addr, ip)
+	}
+	return &peer, nil
+}
+
+// peerCarryingIP returns the tailnet address of the peer that ip belongs to,
+// either because it is the peer's own address or because the peer advertises a
+// route covering it.
+func peerCarryingIP(stat *ipnstate.Status, ip netip.Addr) (netip.Addr, bool) {
+	for _, peer := range stat.Peer {
+		for _, peerIP := range peer.TailscaleIPs {
+			if peerIP == ip {
+				return peer.TailscaleIPs[0], true
 			}
+		}
+	}
+
+	// Otherwise the subnet router advertising the most specific route wins.
+	// Default routes are skipped: an exit node advertises 0.0.0.0/0, which
+	// contains every address and would otherwise shadow the real owner at
+	// random, since Go's map iteration order is unspecified. Ties are broken by
+	// the lowest tailnet address so repeated calls agree with each other.
+	bestBits := -1
+	var best netip.Addr
+	for _, peer := range stat.Peer {
+		if peer.AllowedIPs == nil || peer.AllowedIPs.IsNil() || len(peer.TailscaleIPs) == 0 {
+			continue
+		}
+		for _, route := range peer.AllowedIPs.All() {
+			if route.Bits() == 0 || !route.Contains(ip) {
+				continue
+			}
+			candidate := peer.TailscaleIPs[0]
+			if route.Bits() > bestBits || (route.Bits() == bestBits && candidate.Compare(best) < 0) {
+				bestBits, best = route.Bits(), candidate
+			}
+		}
+	}
+	return best, bestBits >= 0
+}
+
+// resolveHostToIP resolves a bare hostname to an address using the tailnet's
+// own resolver, falling back to DNS-over-HTTPS. Both the dial path and the
+// connectivity diagnostics go through here so they share one view of DNS.
+//
+// A bare single-label name additionally gets the MagicDNS suffix appended so
+// short tailnet hostnames still resolve; a name that already contains a dot (an
+// FQDN, including split-DNS suffixes) is queried as-is.
+func resolveHostToIP(ctx context.Context, srv *tsnet.Server, host string) (netip.Addr, error) {
+	candidates := []string{host}
+	if suffix, ok := GetMagicDNSSuffix(); ok && !strings.Contains(host, ".") {
+		candidates = append(candidates, host+"."+suffix)
+	}
+
+	var lastErr error
+	if dnsMgr, ok := srv.Sys().DNSManager.GetOK(); ok {
+		for _, name := range candidates {
+			ip, err := resolveHostViaResolver(ctx, dnsMgr, name)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return ip, nil
 		}
 	} else {
-		suffix, ok := GetMagicDNSSuffix()
-		if ok {
-			if !strings.HasSuffix(addr, suffix) {
-				dnsMgr, ok := srv.Sys().DNSManager.GetOK()
-				if !ok {
-					return nil, errors.New("DNS manager not available")
-				}
-				ipaddr, err := resolveHostViaResolver(ctx, dnsMgr, addr)
-				if err != nil {
-					return nil, err
-				}
-				return resolveAddr(ctx, srv, ipaddr.String())
-			}
-		}
-		// addr is tailscale domain, resolve it
-		for _, peer := range stat.Peer {
-			dnsName := strings.TrimSuffix(peer.DNSName, ".")
-			if dnsName == addr {
-				return &peer.TailscaleIPs[0], nil
-			}
+		lastErr = errors.New("DNS manager not available")
+	}
+
+	// Fallback: resolve public names via DNS-over-HTTPS when the tailnet
+	// resolver couldn't (no working system DNS on the host, or a name outside
+	// the tailnet's split-DNS routes). Only the original host is queried — DoH
+	// can't resolve tailnet-internal MagicDNS names.
+	if dohEnabled() {
+		if ip, derr := resolveHostViaDoH(ctx, host); derr == nil {
+			return ip, nil
+		} else {
+			lastErr = fmt.Errorf("tailnet dns: %v; doh: %w", lastErr, derr)
 		}
 	}
 
-	return nil, errors.New(fmt.Sprintf("addr '%s' not found in tsnet", addr))
+	return netip.Addr{}, fmt.Errorf("resolve %q: %w", host, lastErr)
 }
 
 // resolveDialAddr resolves the host portion of a "host:port" destination to a
@@ -117,42 +179,11 @@ func resolveDialAddr(ctx context.Context, srv *tsnet.Server, addr string) (strin
 		return addr, nil // already ip:port, nothing to resolve
 	}
 
-	// Names to try, in order. A bare single-label name additionally gets the
-	// MagicDNS suffix appended so short tailnet hostnames still resolve; a name
-	// that already contains a dot (an FQDN, including split-DNS suffixes) is
-	// queried as-is.
-	candidates := []string{host}
-	if suffix, ok := GetMagicDNSSuffix(); ok && !strings.Contains(host, ".") {
-		candidates = append(candidates, host+"."+suffix)
+	ip, err := resolveHostToIP(ctx, srv, host)
+	if err != nil {
+		return addr, err
 	}
-
-	var lastErr error
-	if dnsMgr, ok := srv.Sys().DNSManager.GetOK(); ok {
-		for _, name := range candidates {
-			ip, err := resolveHostViaResolver(ctx, dnsMgr, name)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			return net.JoinHostPort(ip.String(), port), nil
-		}
-	} else {
-		lastErr = errors.New("DNS manager not available")
-	}
-
-	// Fallback: resolve public names via DNS-over-HTTPS when the tailnet
-	// resolver couldn't (no working system DNS on the host, or a name outside
-	// the tailnet's split-DNS routes). Only the original host is queried — DoH
-	// can't resolve tailnet-internal MagicDNS names.
-	if dohEnabled() {
-		if ip, derr := resolveHostViaDoH(ctx, host); derr == nil {
-			return net.JoinHostPort(ip.String(), port), nil
-		} else {
-			lastErr = fmt.Errorf("tailnet dns: %v; doh: %w", lastErr, derr)
-		}
-	}
-
-	return addr, fmt.Errorf("resolve %q: %w", host, lastErr)
+	return net.JoinHostPort(ip.String(), port), nil
 }
 
 // dnsExchange sends a single DNS question and returns the first address answer,

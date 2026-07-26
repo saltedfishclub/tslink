@@ -45,8 +45,16 @@ func StartTimeWatchDog(ctx context.Context, logger *slog.Logger) <-chan struct{}
 	return ch
 }
 
-func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][]ConnectRule, logger *slog.Logger) ([]netip.Addr, error) {
+// getPeerFromRules maps every connect rule's destination onto the tailnet peer
+// that carries it. Alongside the peers it reports how many rules could not be
+// resolved at all; those are retryable, unlike destinations that resolve to an
+// address outside the tailnet (an ordinary public host), which are skipped for
+// good. warn selects whether unresolved rules are logged as warnings — during
+// startup the tailnet resolver may not have its split-DNS routes yet, so the
+// first few rounds stay quiet.
+func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][]ConnectRule, logger *slog.Logger, warn bool) ([]netip.Addr, int) {
 	peerSet := make(map[netip.Addr]struct{})
+	unresolved := 0
 
 	for tag, rrs := range rules {
 		for _, rule := range rrs {
@@ -61,7 +69,18 @@ func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][
 			addr, err := resolveAddr(ctx, srv, ap)
 
 			if err != nil {
-				logger.Warn("failed to resolve address", "err", err)
+				if errors.Is(err, errNotTailnetPeer) {
+					logger.Debug("destination is outside the tailnet, skipping diagnostics",
+						"tag", tag, "dst", rule.DstAddr, "err", err)
+					continue
+				}
+				unresolved++
+				if warn {
+					logger.Warn("failed to resolve address", "tag", tag, "dst", rule.DstAddr, "err", err)
+				} else {
+					logger.Debug("failed to resolve address (tailnet DNS may still be settling)",
+						"tag", tag, "dst", rule.DstAddr, "err", err)
+				}
 				continue
 			}
 			logger.Debug("address found", "dst_addr", rule.DstAddr, "tag", tag, "address", addr)
@@ -73,7 +92,7 @@ func getPeerFromRules(ctx context.Context, srv *tsnet.Server, rules map[string][
 	for peer := range peerSet {
 		result = append(result, peer)
 	}
-	return result, nil
+	return result, unresolved
 }
 
 func peerConnectivityLogic(ctx context.Context, lc *local.Client, relativePeers []netip.Addr, logger *slog.Logger) {
@@ -117,16 +136,19 @@ func peerConnectivityLogic(ctx context.Context, lc *local.Client, relativePeers 
 	}
 }
 
-func StartPeerConnectivityDiagnostics(ctx context.Context, logger *slog.Logger, srv *tsnet.Server, rules map[string][]ConnectRule) {
-	relativePeers, err := getPeerFromRules(ctx, srv, rules, logger)
-	if err != nil {
-		return
-	}
-	logger.Debug("Peers loaded", "count", len(relativePeers))
+const (
+	// peerDiagInterval is how often connectivity to each peer is re-checked.
+	peerDiagInterval = 120 * time.Second
+	// A tsnet server reports Running before the netmap's DNS configuration has
+	// been programmed into its resolver, and accept-routes is only applied once
+	// the server is up — so at startup a split-DNS destination can briefly fail
+	// to resolve even though it resolves fine moments later. Retry a handful of
+	// times before reporting anything as broken.
+	peerDiagWarmupTries = 6
+	peerDiagWarmupDelay = 2 * time.Second
+)
 
-	if len(relativePeers) == 0 {
-		return
-	}
+func StartPeerConnectivityDiagnostics(ctx context.Context, logger *slog.Logger, srv *tsnet.Server, rules map[string][]ConnectRule) {
 	go func() {
 		lc, err := srv.LocalClient()
 		if err != nil {
@@ -134,18 +156,42 @@ func StartPeerConnectivityDiagnostics(ctx context.Context, logger *slog.Logger, 
 			return
 		}
 
-		ticker := time.NewTicker(120 * time.Second)
+		// Warm-up: keep retrying while destinations are still unresolvable, and
+		// only escalate to a warning on the final attempt.
+		var peers []netip.Addr
+		for try := 1; ; try++ {
+			last := try >= peerDiagWarmupTries
+			var unresolved int
+			peers, unresolved = getPeerFromRules(ctx, srv, rules, logger, last)
+			if unresolved == 0 || last {
+				break
+			}
+			logger.Debug("waiting for tailnet DNS before diagnosing peers",
+				"unresolved", unresolved, "attempt", try)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(peerDiagWarmupDelay):
+			}
+		}
+		logger.Debug("Peers loaded", "count", len(peers))
+
+		ticker := time.NewTicker(peerDiagInterval)
 		defer ticker.Stop()
 
-		peerConnectivityLogic(ctx, lc, relativePeers, logger) // execute now
-
 		for {
+			peerConnectivityLogic(ctx, lc, peers, logger)
+
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				peerConnectivityLogic(ctx, lc, relativePeers, logger)
 			}
+
+			// Re-resolve every round: destinations that failed at startup
+			// recover on their own, and split-DNS records may point elsewhere
+			// than they did two minutes ago.
+			peers, _ = getPeerFromRules(ctx, srv, rules, logger, true)
 		}
 	}()
 }
@@ -174,11 +220,13 @@ func NormalizeDstAddrWithSuffix(ctx context.Context, srv *tsnet.Server, dst stri
 		return dst, false, nil
 	}
 
-	normalized := net.JoinHostPort(host+"."+suffix, port)
+	qualified := host + "." + suffix
+	normalized := net.JoinHostPort(qualified, port)
 
-	// check domain exists before use
+	// check domain exists before use. resolveAddr takes a bare host — passing
+	// the "host:port" form made every lookup here fail on the stray colon.
 	if strings.Contains(host, ".") {
-		_, err = resolveAddr(ctx, srv, normalized)
+		_, err = resolveAddr(ctx, srv, qualified)
 		if err != nil {
 			return dst, false, nil
 		}
@@ -187,7 +235,18 @@ func NormalizeDstAddrWithSuffix(ctx context.Context, srv *tsnet.Server, dst stri
 	return normalized, true, nil
 }
 
+// normalizeDNSBudget caps how long the whole normalization pass may spend
+// waiting on DNS. It runs before the connectors start listening, and on a cold
+// start the tailnet resolver needs a few seconds before it answers — without a
+// bound the listeners would not come up until then. A name that cannot be
+// checked in time simply keeps its configured form, which is the same
+// conclusion the check reaches for anything that is not a MagicDNS name.
+const normalizeDNSBudget = 2 * time.Second
+
 func NormalizeConnectRulesDstAddr(ctx context.Context, srv *tsnet.Server, rules map[string][]ConnectRule, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, normalizeDNSBudget)
+	defer cancel()
+
 	for tag, rrs := range rules {
 		for i := range rrs {
 			rule := &rrs[i]
