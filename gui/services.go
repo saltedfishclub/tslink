@@ -58,6 +58,60 @@ func (s serviceServer) Title() string {
 	return s.Host
 }
 
+// serviceGroup collects the servers that resolve to one tailnet peer. A homelab
+// subnet router that fronts several hosts — say tsdns-homelab carrying every
+// *.homelab.ice destination — appears once, with its hosts nested beneath it,
+// instead of as a run of sibling rows the user has to recognise as one machine.
+type serviceGroup struct {
+	// Peer is the node every server in the group resolved to, or nil when the
+	// group is a single standalone destination outside the tailnet.
+	Peer    *core.PeerInfo
+	Servers []serviceServer
+}
+
+// Online mirrors serviceServer.Online: a group is down only when its peer is a
+// known, offline tailnet node. Peerless (public) groups have nothing to report.
+func (g serviceGroup) Online() bool { return g.Peer == nil || g.Peer.Online }
+
+// Title is the group header: the peer's friendly name when it resolved, else the
+// single host the group stands for.
+func (g serviceGroup) Title() string {
+	if g.Peer != nil && g.Peer.DisplayName != "" {
+		return g.Peer.DisplayName
+	}
+	if len(g.Servers) > 0 {
+		return g.Servers[0].Title()
+	}
+	return ""
+}
+
+// groupServices collapses the per-host servers into per-peer groups. Servers
+// that resolved to the same tailnet node join one group; a server with no peer —
+// an ordinary public destination — is a group of its own.
+//
+// The input is already sorted by buildServices (by title, then host), and
+// servers behind one peer share a title, so they arrive adjacent and already
+// host-ordered. First appearance fixes each group's position, so the section
+// keeps the stable order buildServices established and never reshuffles between
+// frames.
+func groupServices(servers []serviceServer) []serviceGroup {
+	groups := make([]serviceGroup, 0, len(servers))
+	byPeer := make(map[string]int) // peer ID -> index into groups
+	for _, srv := range servers {
+		if srv.Peer == nil {
+			groups = append(groups, serviceGroup{Servers: []serviceServer{srv}})
+			continue
+		}
+		if idx, ok := byPeer[srv.Peer.ID]; ok {
+			groups[idx].Servers = append(groups[idx].Servers, srv)
+			continue
+		}
+		byPeer[srv.Peer.ID] = len(groups)
+		groups = append(groups, serviceGroup{Peer: srv.Peer, Servers: []serviceServer{srv}})
+	}
+	return groups
+}
+
 // buildServices turns connect rules into the per-server view.
 //
 // Grouping is by destination host rather than by config tag: a server reached
@@ -146,17 +200,90 @@ func (p *overviewPage) servicesCard(a *App, gtx C, servers []serviceServer) D {
 	card.Title = th.T(KSvcTitle)
 	card.Subtitle = th.T(KSvcSubtitle)
 
+	groups := groupServices(servers)
 	return card.Layout(th, gtx, func(gtx C) D {
-		if len(servers) == 0 {
+		if len(groups) == 0 {
 			return th.EmptyState(gtx, IconServer, th.T(KSvcEmpty), "")
 		}
-		children := make([]layout.FlexChild, 0, len(servers)*2)
-		for i, srv := range servers {
+		children := make([]layout.FlexChild, 0, len(groups)*2)
+		for i, g := range groups {
 			if i > 0 {
 				children = append(children, layout.Rigid(th.Divider))
 			}
 			children = append(children, layout.Rigid(func(gtx C) D {
-				return p.serverGroup(a, gtx, srv)
+				return p.serviceGroupRow(a, gtx, g)
+			}))
+		}
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	})
+}
+
+// serviceGroupRow renders one peer group. A group standing for a single host —
+// whether a resolved peer or a bare public destination — keeps the flat
+// one-server layout, so the common case looks exactly as it did before. A peer
+// that fronts several hosts gets a header of its own with each host nested
+// beneath it.
+func (p *overviewPage) serviceGroupRow(a *App, gtx C, g serviceGroup) D {
+	if g.Peer == nil || len(g.Servers) == 1 {
+		return p.serverGroup(a, gtx, g.Servers[0])
+	}
+	return p.peerGroup(a, gtx, g)
+}
+
+// peerGroup renders a tailnet node and every host reached through it: one status
+// dot and name for the node, then each destination host as a nested block.
+func (p *overviewPage) peerGroup(a *App, gtx C, g serviceGroup) D {
+	th := a.th
+	level := LevelOK
+	if !g.Online() {
+		level = LevelFail
+	}
+
+	return layout.Inset{Top: SpaceSM, Bottom: SpaceSM}.Layout(gtx, func(gtx C) D {
+		children := []layout.FlexChild{
+			layout.Rigid(func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D {
+						return th.StatusDot(gtx, level, false)
+					}),
+					HGap(SpaceMD),
+					layout.Flexed(1, func(gtx C) D {
+						return OneLine(th.Body(g.Title())).Layout(gtx)
+					}),
+				)
+			}),
+		}
+		for _, srv := range g.Servers {
+			children = append(children, layout.Rigid(func(gtx C) D {
+				return p.hostBlock(a, gtx, srv)
+			}))
+		}
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	})
+}
+
+// hostBlock renders one destination host nested under its peer group: the host
+// name, then the services pointing at it. The peer's status and name already sit
+// in the group header, so only the host and its ports repeat here.
+func (p *overviewPage) hostBlock(a *App, gtx C, srv serviceServer) D {
+	th := a.th
+	return layout.Inset{Top: SpaceXS, Left: SpaceLG}.Layout(gtx, func(gtx C) D {
+		children := []layout.FlexChild{
+			layout.Rigid(func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D {
+						return IconServer(gtx, gtx.Dp(13), th.P.TextDim)
+					}),
+					HGap(SpaceSM),
+					layout.Flexed(1, func(gtx C) D {
+						return OneLine(th.MonoLabel(SizeCaption, th.P.TextSec, srv.Host)).Layout(gtx)
+					}),
+				)
+			}),
+		}
+		for _, svc := range srv.Services {
+			children = append(children, layout.Rigid(func(gtx C) D {
+				return p.serviceRow(a, gtx, svc)
 			}))
 		}
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)

@@ -4,3 +4,4 @@
 .gocache/**
 tslink
 config.toml
+tslink-gui

@@ -203,8 +203,10 @@ func TestShots(t *testing.T) {
 			"l4d2_udp": {{Protocol: "udp", LocalPort: 27015, DstAddr: "server.l4d2.homelab.ice:27015"}},
 		}}
 		snap := core.PeerSnapshot{Peers: []core.PeerInfo{
-			{ID: "n1", DisplayName: "homelab-mc", Online: true, Linked: true, LinkTags: []string{"sfcraft"}},
-			{ID: "n2", DisplayName: "l4d2-box", Online: false, Linked: true, LinkTags: []string{"l4d2_tcp", "l4d2_udp"}},
+			// One subnet router fronts every *.homelab.ice host, so they collapse
+			// under a single tsdns-homelab header with the hosts nested beneath.
+			{ID: "n1", DisplayName: "tsdns-homelab", Online: true, Linked: true,
+				LinkTags: []string{"sfcraft", "mayday", "l4d2_tcp", "l4d2_udp"}},
 		}}
 		servers := buildServices(cfg, snap)
 		shoot(t, th, "services", image.Pt(760, 480), func(gtx C) D {
