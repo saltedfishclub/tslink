@@ -51,6 +51,7 @@ func TestConfigValidateAcceptsValidConfig(t *testing.T) {
 
 	cfg := Config{
 		Core: Core{AuthKey: "tskey-auth-example"},
+		DNS:  DNS{DoHServers: []string{"https://cloudflare-dns.com/dns-query"}},
 		Forward: map[string][]ForwardRule{
 			"web": {
 				{Protocol: "tcp", TailscalePort: 8080, LocalAddr: "127.0.0.1:9090"},
@@ -99,6 +100,29 @@ func TestConfigValidateRejectsInvalidConfig(t *testing.T) {
 		"forward.bad[0].tailscale_port must be between 1 and 65535",
 		"forward.bad[0].local_addr invalid",
 		"connect.bad[1] local listener duplicates connect.bad[0]",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Validate() error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestConfigValidateRejectsInvalidDoHServer(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Core: Core{AuthKey: "tskey-auth-example"},
+		DNS:  DNS{DoHServers: []string{"https://ok.example/dns-query", "not a url", "ftp://wrong.example"}},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() returned nil, want error")
+	}
+
+	for _, want := range []string{
+		"dns.doh_servers[1] must be a valid http(s) URL",
+		"dns.doh_servers[2] must be a valid http(s) URL",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("Validate() error %q does not contain %q", err.Error(), want)

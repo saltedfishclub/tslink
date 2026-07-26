@@ -14,6 +14,14 @@
 | `ephemeral` | bool | 否 | `true` | 节点是否临时节点，离开 Tailnet 后自动删除 |
 | `accept_routes` | bool | 否 | `true` | 是否接受其他节点发布的子网路由 |
 
+### `[dns]` — DNS 解析配置
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `doh_servers` | []string | 否 | `[]` | DNS-over-HTTPS（RFC 8484）回落解析器地址列表，须为 `http(s)://` URL |
+
+`dst_addr` 中的域名默认走 Tailnet 自身的 DNS 解析器（支持 MagicDNS 与 split-DNS）。当该解析器无法解析目标（例如宿主机本身没有可用的系统 DNS，或目标不在 Tailnet 的 split-DNS 路由内）时，会**依次**尝试 `doh_servers` 中配置的 DoH 端点解析公网域名。留空则关闭此回落。仅对原始域名发起 DoH 查询（Tailnet 内部 MagicDNS 名称无法通过 DoH 解析）。
+
 ### `[[forward.<name>]]` — 转发规则（Tailscale → 本地）
 
 将 Tailscale 上的流量转发到本地服务。`<name>` 为自定义标签名。
@@ -88,6 +96,10 @@ control_url = "https://controlplane.tailscale.com"  # 可选，Headscale 用户�
 hostname = ""                           # 可选，留空使用本机主机名
 ephemeral = true                        # 可选，临时节点
 accept_routes = true                    # 可选，接受子网路由
+
+[dns]
+# 可选，Tailnet DNS 无法解析时回落到 DoH 解析公网域名；留空关闭
+doh_servers = ["https://cloudflare-dns.com/dns-query", "https://dns.google/dns-query"]
 
 # 示例1: 将 Tailnet 上 8080 端口的请求转发到本地 9090
 [[forward.web]]

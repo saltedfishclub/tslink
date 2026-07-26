@@ -117,11 +117,6 @@ func resolveDialAddr(ctx context.Context, srv *tsnet.Server, addr string) (strin
 		return addr, nil // already ip:port, nothing to resolve
 	}
 
-	dnsMgr, ok := srv.Sys().DNSManager.GetOK()
-	if !ok {
-		return addr, errors.New("DNS manager not available")
-	}
-
 	// Names to try, in order. A bare single-label name additionally gets the
 	// MagicDNS suffix appended so short tailnet hostnames still resolve; a name
 	// that already contains a dot (an FQDN, including split-DNS suffixes) is
@@ -132,25 +127,70 @@ func resolveDialAddr(ctx context.Context, srv *tsnet.Server, addr string) (strin
 	}
 
 	var lastErr error
-	for _, name := range candidates {
-		ip, err := resolveHostViaResolver(ctx, dnsMgr, name)
-		if err != nil {
-			lastErr = err
-			continue
+	if dnsMgr, ok := srv.Sys().DNSManager.GetOK(); ok {
+		for _, name := range candidates {
+			ip, err := resolveHostViaResolver(ctx, dnsMgr, name)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return net.JoinHostPort(ip.String(), port), nil
 		}
-		return net.JoinHostPort(ip.String(), port), nil
+	} else {
+		lastErr = errors.New("DNS manager not available")
 	}
-	return addr, fmt.Errorf("resolve %q via tailnet DNS: %w", host, lastErr)
+
+	// Fallback: resolve public names via DNS-over-HTTPS when the tailnet
+	// resolver couldn't (no working system DNS on the host, or a name outside
+	// the tailnet's split-DNS routes). Only the original host is queried — DoH
+	// can't resolve tailnet-internal MagicDNS names.
+	if dohEnabled() {
+		if ip, derr := resolveHostViaDoH(ctx, host); derr == nil {
+			return net.JoinHostPort(ip.String(), port), nil
+		} else {
+			lastErr = fmt.Errorf("tailnet dns: %v; doh: %w", lastErr, derr)
+		}
+	}
+
+	return addr, fmt.Errorf("resolve %q: %w", host, lastErr)
 }
+
+// dnsExchange sends a single DNS question and returns the first address answer,
+// or a CNAME target if one is present instead. It abstracts the transport so the
+// Tailscale resolver and the DNS-over-HTTPS fallback (see doh.go) can share the
+// CNAME-chasing logic in resolveHostChase.
+type dnsExchange func(ctx context.Context, name dnsmessage.Name, qType dnsmessage.Type) (netip.Addr, string, error)
 
 // resolveHostViaResolver resolves a hostname to a netip.Addr using the
 // Tailscale DNS resolver. It queries A then AAAA records and follows CNAME
 // chains (up to 8 levels deep).
 func resolveHostViaResolver(ctx context.Context, resolver *dns.Manager, host string) (netip.Addr, error) {
-	return resolveHostWithDepth(ctx, resolver, host, 0)
+	return resolveHostChase(ctx, host, 0, tailnetExchange(resolver))
 }
 
-func resolveHostWithDepth(ctx context.Context, r *dns.Manager, host string, depth int) (netip.Addr, error) {
+// tailnetExchange returns a dnsExchange backed by the Tailscale DNS resolver.
+func tailnetExchange(r *dns.Manager) dnsExchange {
+	return func(ctx context.Context, name dnsmessage.Name, qType dnsmessage.Type) (netip.Addr, string, error) {
+		queryBytes, err := buildDNSQuery(name, qType)
+		if err != nil {
+			return netip.Addr{}, "", err
+		}
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		respBytes, err := r.Query(qctx, queryBytes, "udp", netip.AddrPort{})
+		if err != nil {
+			return netip.Addr{}, "", fmt.Errorf("DNS resolution failed for %s: %w", strings.TrimSuffix(name.String(), "."), err)
+		}
+		return parseDNSAnswer(respBytes)
+	}
+}
+
+// resolveHostChase resolves host to an address by issuing A then AAAA questions
+// through exchange and following CNAME chains (up to maxCNAMEChase levels deep).
+// A first (MagicDNS hands out an IPv4 for tailnet peers), then AAAA so IPv6-only
+// split-DNS hosts still resolve; a CNAME seen in either answer is chased once no
+// address record is found.
+func resolveHostChase(ctx context.Context, host string, depth int, exchange dnsExchange) (netip.Addr, error) {
 	const maxCNAMEChase = 8
 	if depth > maxCNAMEChase {
 		return netip.Addr{}, fmt.Errorf("CNAME chain too deep for %s", host)
@@ -161,12 +201,9 @@ func resolveHostWithDepth(ctx context.Context, r *dns.Manager, host string, dept
 		return netip.Addr{}, fmt.Errorf("invalid hostname %s: %w", host, err)
 	}
 
-	// Query A first (MagicDNS hands out an IPv4 for tailnet peers), then AAAA so
-	// IPv6-only split-DNS hosts still resolve. A CNAME seen in either answer is
-	// chased once no address record is found.
 	var cnameTarget string
 	for _, qType := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
-		ip, cname, err := queryResolver(ctx, r, name, qType)
+		ip, cname, err := exchange(ctx, name, qType)
 		if err != nil {
 			return netip.Addr{}, err
 		}
@@ -178,18 +215,15 @@ func resolveHostWithDepth(ctx context.Context, r *dns.Manager, host string, dept
 		}
 	}
 
-	// Follow CNAME if no direct address record was found.
 	if cnameTarget != "" {
-		return resolveHostWithDepth(ctx, r, cnameTarget, depth+1)
+		return resolveHostChase(ctx, cnameTarget, depth+1, exchange)
 	}
 
 	return netip.Addr{}, fmt.Errorf("no A/AAAA record found for %s", host)
 }
 
-// queryResolver sends a single question of the given type to the Tailscale DNS
-// resolver and returns the first address answer, or a CNAME target if one is
-// present instead.
-func queryResolver(ctx context.Context, r *dns.Manager, name dnsmessage.Name, qType dnsmessage.Type) (netip.Addr, string, error) {
+// buildDNSQuery packs a single-question DNS query message for name/qType.
+func buildDNSQuery(name dnsmessage.Name, qType dnsmessage.Type) ([]byte, error) {
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{RecursionDesired: true},
 		Questions: []dnsmessage.Question{
@@ -198,16 +232,14 @@ func queryResolver(ctx context.Context, r *dns.Manager, name dnsmessage.Name, qT
 	}
 	queryBytes, err := msg.Pack()
 	if err != nil {
-		return netip.Addr{}, "", fmt.Errorf("failed to pack DNS query: %w", err)
+		return nil, fmt.Errorf("failed to pack DNS query: %w", err)
 	}
+	return queryBytes, nil
+}
 
-	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	respBytes, err := r.Query(qctx, queryBytes, "udp", netip.AddrPort{})
-	if err != nil {
-		return netip.Addr{}, "", fmt.Errorf("DNS resolution failed for %s: %w", strings.TrimSuffix(name.String(), "."), err)
-	}
-
+// parseDNSAnswer unpacks a DNS response and returns the first A/AAAA address, or
+// a CNAME target if one is present instead of an address record.
+func parseDNSAnswer(respBytes []byte) (netip.Addr, string, error) {
 	var resp dnsmessage.Message
 	if err := resp.Unpack(respBytes); err != nil {
 		return netip.Addr{}, "", fmt.Errorf("failed to unpack DNS response: %w", err)

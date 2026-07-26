@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -41,6 +42,13 @@ type Core struct {
 	AcceptRoutes bool   `toml:"accept_routes"`
 }
 
+// DNS holds resolver options. DoHServers are DNS-over-HTTPS endpoints (RFC 8484)
+// queried as a fallback when the tailnet resolver cannot resolve a dial
+// destination. An empty list disables the fallback.
+type DNS struct {
+	DoHServers []string `toml:"doh_servers"`
+}
+
 func (r ConnectRule) LANEnabled() bool {
 	if r.LanEnable != nil {
 		return *r.LanEnable
@@ -67,6 +75,7 @@ func (r ConnectRule) BindIP() string {
 
 type Config struct {
 	Core    Core                     `toml:"core"`
+	DNS     DNS                      `toml:"dns"`
 	Forward map[string][]ForwardRule `toml:"forward"`
 	Connect map[string][]ConnectRule `toml:"connect"`
 }
@@ -92,6 +101,13 @@ func (cfg *Config) Validate() error {
 
 	if strings.TrimSpace(cfg.Core.AuthKey) == "" {
 		errs = append(errs, errors.New("core.auth_key is required"))
+	}
+
+	for i, server := range cfg.DNS.DoHServers {
+		u, err := url.Parse(strings.TrimSpace(server))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, fmt.Errorf("dns.doh_servers[%d] must be a valid http(s) URL", i))
+		}
 	}
 
 	usedForwardListeners := make(map[string]string)

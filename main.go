@@ -28,6 +28,11 @@ func serviceLogic(configPath string, isTsnetDebug bool, configURL string, logger
 		os.Exit(1)
 	}
 
+	core.SetDoHServers(cfg.DNS.DoHServers)
+	if len(cfg.DNS.DoHServers) > 0 {
+		logger.Info("DNS-over-HTTPS fallback enabled", "servers", cfg.DNS.DoHServers)
+	}
+
 	ctx, cancelAll := context.WithCancel(context.Background())
 	defer cancelAll()
 	logger.Info("initializing tsnet server")

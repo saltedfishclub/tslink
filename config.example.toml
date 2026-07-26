@@ -5,6 +5,13 @@ hostname = ""  # leave blank to use machine name
 ephemeral = true
 accept_routes = true
 
+[dns]
+# Fallback DNS-over-HTTPS resolvers (RFC 8484), tried only when the tailnet
+# resolver can't resolve a destination (e.g. the host has no working system DNS,
+# or the name is outside the tailnet's split-DNS routes). Leave empty to disable.
+doh_servers = []
+# doh_servers = ["https://cloudflare-dns.com/dns-query", "https://dns.google/dns-query"]
+
 [[forward.web]]  # you -> others
 protocol = "tcp"
 tailscale_port = 8080
