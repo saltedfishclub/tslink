@@ -5,6 +5,12 @@ hostname = ""  # leave blank to use machine name
 ephemeral = true
 accept_routes = true
 
+# Uncomment to receive Taildrop files directly into this directory.
+# Omit the section to leave Taildrop disabled.
+# The tailnet ACL must allow file sharing (tailscale.com/cap/file-sharing).
+# [[feature.taildrop]]
+# directory = "/data/Taildrop"
+
 [[forward.web]]  # you -> others
 protocol = "tcp"
 tailscale_port = 8080

@@ -11,7 +11,17 @@ import (
 	"tailscale.com/tsnet"
 )
 
-func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog bool) (*tsnet.Server, error) {
+func InitTsNet(ctx context.Context, cfg *Config, logger *slog.Logger, withDebugLog bool) (*tsnet.Server, error) {
+	taildropDir, taildropEnabled, err := applyTaildropConfig(cfg.Feature)
+	if err != nil {
+		return nil, err
+	}
+	if taildropEnabled {
+		logger.With(slog.String("directory", taildropDir)).Info("taildrop receive enabled")
+	} else {
+		logger.Debug("taildrop receive disabled")
+	}
+
 	dbgLogger := func(fmt string, args ...interface{}) {}
 	if withDebugLog {
 		logger.Warn("Tsnet debug log activated")
@@ -25,9 +35,9 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 	}
 
 	srv := &tsnet.Server{
-		Hostname:  "tslink-" + cfg.Hostname,
-		AuthKey:   cfg.AuthKey,
-		Ephemeral: cfg.Ephemeral,
+		Hostname:  "tslink-" + cfg.Core.Hostname,
+		AuthKey:   cfg.Core.AuthKey,
+		Ephemeral: cfg.Core.Ephemeral,
 		Logf:      dbgLogger,
 		UserLogf: func(fmt string, args ...interface{}) {
 			logger.With(slog.String("from", "tsnet")).Info(fmt2.Sprintf(fmt, args...))
@@ -35,8 +45,8 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 		RunWebClient: withDebugLog,
 	}
 
-	if cfg.ControlURL != "" {
-		srv.ControlURL = cfg.ControlURL
+	if cfg.Core.ControlURL != "" {
+		srv.ControlURL = cfg.Core.ControlURL
 	}
 
 	logger.Debug("starting tsnet server")
@@ -65,7 +75,7 @@ func InitTsNet(ctx context.Context, cfg *Core, logger *slog.Logger, withDebugLog
 		logger.Info("MagicDNS suffix extracted", slog.String("suffix", rawSuffix))
 	}
 
-	if cfg.AcceptRoutes {
+	if cfg.Core.AcceptRoutes {
 		lc, err := srv.LocalClient()
 		if err != nil {
 			logger.With(slog.String("error", err.Error())).Error("error from getting local client")

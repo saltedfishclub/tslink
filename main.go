@@ -31,7 +31,7 @@ func serviceLogic(configPath string, isTsnetDebug bool, configURL string, logger
 	ctx, cancelAll := context.WithCancel(context.Background())
 	defer cancelAll()
 	logger.Info("initializing tsnet server")
-	srv, err := core.InitTsNet(ctx, &cfg.Core, logger, isTsnetDebug)
+	srv, err := core.InitTsNet(ctx, cfg, logger, isTsnetDebug)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			logger.Debug("tsnet initialization timed out, retrying")

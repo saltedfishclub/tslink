@@ -65,8 +65,17 @@ func (r ConnectRule) BindIP() string {
 	return "127.0.0.1"
 }
 
+type Taildrop struct {
+	Directory string `toml:"directory"`
+}
+
+type Feature struct {
+	Taildrop []Taildrop `toml:"taildrop"`
+}
+
 type Config struct {
 	Core    Core                     `toml:"core"`
+	Feature Feature                  `toml:"feature"`
 	Forward map[string][]ForwardRule `toml:"forward"`
 	Connect map[string][]ConnectRule `toml:"connect"`
 }

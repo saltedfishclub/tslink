@@ -41,6 +41,27 @@
 
 **Minecraft 模式说明：** `protocol = "minecraft"` 实质为 TCP 转发，额外在多播地址 `224.0.2.60:4445`（IPv4）和 `ff75:230::60:4445`（IPv6）上发送 LAN 广播，使局域网内的 Minecraft 客户端可直接发现服务器。
 
+### `[[feature.taildrop]]` — Taildrop 接收
+
+默认关闭。写入该段后，本节点可接收 Tailnet 内其他设备发来的 Taildrop 文件，并直接落到指定目录（不经过暂存二次拷贝）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `directory` | string | **是** | 收件目录。相对路径按进程工作目录转绝对路径，支持环境变量（如 `$HOME/Taildrop`） |
+
+```toml
+[[feature.taildrop]]
+directory = "/data/Taildrop"
+```
+
+规则：
+
+- 没有 `[[feature.taildrop]]`：不启用。
+- `directory` 为空：启动失败。
+- 只能写一段；多段启动失败。
+
+前置条件：tailnet ACL 需打开 file sharing（`tailscale.com/cap/file-sharing`）。当前仅支持接收，不支持从本节点向外发送。
+
 ## 命令行参数
 
 | 参数 | 默认值 | 说明 |
@@ -88,6 +109,10 @@ control_url = "https://controlplane.tailscale.com"  # 可选，Headscale 用户�
 hostname = ""                           # 可选，留空使用本机主机名
 ephemeral = true                        # 可选，临时节点
 accept_routes = true                    # 可选，接受子网路由
+
+# 可选: 接收 Taildrop 文件到指定目录
+# [[feature.taildrop]]
+# directory = "/data/Taildrop"
 
 # 示例1: 将 Tailnet 上 8080 端口的请求转发到本地 9090
 [[forward.web]]
