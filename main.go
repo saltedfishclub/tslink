@@ -52,6 +52,8 @@ func serviceLogic(configPath string, isTsnetDebug bool, configURL string, logger
 
 	core.StartPeerConnectivityDiagnostics(ctx, logger, srv, cfg.Connect)
 
+	core.StartNatTypeDetection(ctx, srv, logger.With("from", "natcheck"))
+
 	sigHandler := make(chan os.Signal, 1)
 	signal.Notify(sigHandler, os.Interrupt, syscall.SIGTERM)
 
